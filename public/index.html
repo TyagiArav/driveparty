@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DriveParty</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🍿</text></svg>">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="home">
+    <div class="home-inner">
+      <header>
+        <a class="brand" href="/">
+          <span class="logo"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></span>
+          DriveParty
+        </a>
+        <h1>Watch Drive videos <span>together.</span></h1>
+        <p>Paste a Google Drive video link, send your friend the invite, and play, pause and skip in sync, with chat on the side.</p>
+      </header>
+
+      <div class="cards">
+        <section class="card">
+          <h2>Start a party</h2>
+          <form id="create-form" novalidate>
+            <div class="field">
+              <label for="create-link">Google Drive video link</label>
+              <input class="input" id="create-link" placeholder="https://drive.google.com/file/d/…/view" autocomplete="off" required>
+            </div>
+            <div class="field">
+              <label for="create-name">Your name</label>
+              <input class="input" id="create-name" maxlength="24" placeholder="e.g. Arav" autocomplete="nickname">
+            </div>
+            <p class="error" id="create-error"></p>
+            <button class="btn primary" type="submit" id="create-btn">Create party</button>
+            <p class="hint">The file must be shared as <b>Anyone with the link</b>. MP4 (H.264) and WebM play in all browsers.</p>
+          </form>
+        </section>
+
+        <section class="card">
+          <h2>Join a party</h2>
+          <form id="join-form" novalidate>
+            <div class="field">
+              <label for="join-code">Party code or invite link</label>
+              <input class="input" id="join-code" placeholder="e.g. K7QM2X" autocomplete="off" required>
+            </div>
+            <p class="error" id="join-error"></p>
+            <button class="btn" type="submit">Join</button>
+          </form>
+        </section>
+      </div>
+
+      <ol class="steps">
+        <li><b>1. Share the file</b>In Drive, set sharing to “Anyone with the link”.</li>
+        <li><b>2. Invite a friend</b>Send them the party link or the 6-letter code.</li>
+        <li><b>3. Watch in sync</b>Anyone can play, pause or seek, and everyone follows.</li>
+      </ol>
+    </div>
+  </main>
+  <script type="module" src="/home.js"></script>
+</body>
+</html>

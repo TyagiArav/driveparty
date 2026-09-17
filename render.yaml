@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: driveparty
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: GOOGLE_API_KEY
+        sync: false
