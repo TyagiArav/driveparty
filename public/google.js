@@ -111,8 +111,71 @@ export async function checkDriveAccess(id) {
   if (res.status === 403 || res.status === 404) return { ok: false, reason: 'no-access' };
   if (!res.ok) return { ok: false, reason: 'error' };
   const file = await res.json();
-  if (!file.mimeType?.startsWith('video/') && file.mimeType !== 'application/octet-stream') return { ok: false, reason: 'not-video', name: file.name };
-  return { ok: true, name: file.name, mimeType: file.mimeType, size: Number(file.size) };
+  const isHls = isHlsFile(file);
+  if (!isHls && !file.mimeType?.startsWith('video/') && file.mimeType !== 'application/octet-stream') {
+    return { ok: false, reason: 'not-video', name: file.name };
+  }
+  return { ok: true, name: file.name, mimeType: file.mimeType, size: Number(file.size), isHls };
+}
+
+export function isHlsFile(file) {
+  return /\.m3u8$/i.test(file.name || '') || /mpegurl/i.test(file.mimeType || '');
+}
+
+/** Every relative file a playlist points at: segments, variant playlists, keys, init segments. */
+function playlistUris(text) {
+  const uris = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (line.startsWith('#')) {
+      for (const match of line.matchAll(/URI="([^"]+)"/g)) uris.push(match[1]);
+    } else {
+      uris.push(line);
+    }
+  }
+  return uris.filter((uri) => !/^[a-z][a-z0-9+.-]*:/i.test(uri)); // absolute URLs load on their own
+}
+
+function baseName(uri) {
+  const last = uri.split(/[?#]/)[0].split('/').pop() || '';
+  try {
+    return decodeURIComponent(last);
+  } catch {
+    return last;
+  }
+}
+
+/**
+ * Check that the signed-in user can open every file an HLS stream in Drive needs.
+ * Resolves to { ok: true } or { ok: false, reason: 'hls-missing', missing, folderId } / { ok: false, reason: 'error' }.
+ */
+export async function checkDriveHls(playlistId) {
+  const base = `/media/drive-hls/${encodeURIComponent(playlistId)}/`;
+  const indexRes = await fetch(`${base}?index`, { cache: 'no-store' }).catch(() => null);
+  if (!indexRes?.ok) return { ok: false, reason: indexRes?.status === 401 ? 'signed-out' : 'error' };
+  const index = await indexRes.json();
+
+  const available = new Set(index.files);
+  const missing = new Set();
+  const queue = [index.playlist];
+  const seen = new Set();
+  while (queue.length) {
+    const name = queue.shift();
+    if (seen.has(name)) continue;
+    seen.add(name);
+    if (!available.has(name)) {
+      missing.add(name);
+      continue;
+    }
+    const text = await fetch(base + encodeURIComponent(name)).then((r) => (r.ok ? r.text() : '')).catch(() => '');
+    for (const uri of playlistUris(text)) {
+      const child = baseName(uri);
+      if (/\.m3u8$/i.test(child)) queue.push(child);
+      else if (!available.has(child)) missing.add(child);
+    }
+  }
+  return missing.size ? { ok: false, reason: 'hls-missing', missing: [...missing], folderId: index.folderId } : { ok: true };
 }
 
 /**
@@ -122,10 +185,7 @@ export async function checkDriveAccess(id) {
  */
 export async function pickDriveVideo({ fileId } = {}) {
   await initGoogle();
-  const [token] = await Promise.all([
-    getAccessToken(),
-    loadScript('https://apis.google.com/js/api.js').then(() => new Promise((resolve) => window.gapi.load('picker', resolve))),
-  ]);
+  const [token] = await Promise.all([getAccessToken(), loadPickerApi()]);
   const { picker } = window.google;
 
   const views = [];
@@ -136,24 +196,57 @@ export async function pickDriveVideo({ fileId } = {}) {
       new picker.DocsView(picker.ViewId.DOCS_VIDEOS).setOwnedByMe(true).setLabel('My Drive').setMode(picker.DocsViewMode.GRID),
       new picker.DocsView(picker.ViewId.DOCS_VIDEOS).setOwnedByMe(false).setLabel('Shared with me').setMode(picker.DocsViewMode.GRID),
       new picker.DocsView(picker.ViewId.DOCS_VIDEOS).setEnableDrives(true).setLabel('Shared drives').setMode(picker.DocsViewMode.GRID),
+      // HLS playlists (.m3u8) aren't "videos" to Drive, so they only show up among all files.
+      new picker.DocsView(picker.ViewId.DOCS).setIncludeFolders(true).setLabel('All files (for .m3u8)').setMode(picker.DocsViewMode.LIST),
     );
   }
 
+  const docs = await openPicker({
+    token,
+    views,
+    title: fileId ? 'Select the party video to open it' : 'Choose a video or an .m3u8 playlist',
+  });
+  if (!docs) return null;
+  const doc = docs[0];
+  return { id: doc.id, name: doc.name, mimeType: doc.mimeType, isHls: isHlsFile(doc) };
+}
+
+/**
+ * Open the picker inside an HLS stream's folder so the user can select all of its files at once.
+ * Resolves to the number of files selected, or null if cancelled.
+ */
+export async function pickHlsFiles({ folderId }) {
+  await initGoogle();
+  const [token] = await Promise.all([getAccessToken(), loadPickerApi()]);
+  const { picker } = window.google;
+  const view = new picker.DocsView(picker.ViewId.DOCS).setParent(folderId).setMode(picker.DocsViewMode.LIST);
+  const docs = await openPicker({
+    token,
+    views: [view],
+    multiselect: true,
+    title: 'Select every file in this folder (click the first, Shift-click the last)',
+  });
+  return docs ? docs.length : null;
+}
+
+function loadPickerApi() {
+  return loadScript('https://apis.google.com/js/api.js').then(() => new Promise((resolve) => window.gapi.load('picker', resolve)));
+}
+
+function openPicker({ token, views, title, multiselect = false }) {
+  const { picker } = window.google;
   return new Promise((resolve) => {
     const builder = new picker.PickerBuilder()
       .setOAuthToken(token)
       .setDeveloperKey(config.apiKey)
       .setAppId(config.appId)
       .enableFeature(picker.Feature.SUPPORT_DRIVES)
-      .setTitle(fileId ? 'Select the party video to open it' : 'Choose a video')
+      .setTitle(title)
       .setCallback((data) => {
-        if (data.action === picker.Action.PICKED) {
-          const doc = data.docs[0];
-          resolve({ id: doc.id, name: doc.name });
-        } else if (data.action === picker.Action.CANCEL) {
-          resolve(null);
-        }
+        if (data.action === picker.Action.PICKED) resolve(data.docs);
+        else if (data.action === picker.Action.CANCEL) resolve(null);
       });
+    if (multiselect) builder.enableFeature(picker.Feature.MULTISELECT_ENABLED);
     for (const view of views) builder.addView(view);
     builder.build().setVisible(true);
   });
@@ -199,6 +292,7 @@ export function accessMessage(reason, email) {
     case 'no-access': return `This video isn't shared with ${email || 'your Google account'}. Ask whoever owns it to share it with you in Google Drive.`;
     case 'not-video': return 'That Drive file isn\'t a video.';
     case 'cancelled': return 'You need to select the video in the Google picker so DriveParty can open it.';
+    case 'hls-missing': return 'Some of this stream\'s files haven\'t been opened with DriveParty yet.';
     default: return 'Couldn\'t reach Google Drive. Try again.';
   }
 }

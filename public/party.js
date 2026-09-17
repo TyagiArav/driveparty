@@ -1,9 +1,9 @@
 import {
-  parseSource, sourceSrc, urlTitle, formatTime, savedName, saveName, toast, copyText,
+  parseSource, detectUrlFormat, sourceSrc, urlTitle, formatTime, savedName, saveName, toast, copyText,
 } from './common.js';
 import {
-  initGoogle, getMe, signIn, signOut, checkDriveAccess, openDriveFile, pickDriveVideo, ensureMediaWorker,
-  accessMessage, NeedsConsentError,
+  initGoogle, getMe, signIn, signOut, checkDriveAccess, checkDriveHls, openDriveFile, pickDriveVideo, pickHlsFiles,
+  ensureMediaWorker, accessMessage, NeedsConsentError,
 } from './google.js';
 
 const $ = (id) => document.getElementById(id);
@@ -30,6 +30,7 @@ let playBlocked = false;
 let videoFailed = false;
 let unread = 0;
 let firstJoin = true;
+let hls = null; // hls.js instance for HLS sources
 
 // ---------------------------------------------------------------------------
 // Clock + playback sync
@@ -93,6 +94,8 @@ video.addEventListener('play', () => {
 });
 
 video.addEventListener('pause', () => {
+  // Chrome pauses muted videos in hidden tabs on its own; that isn't this viewer pausing the party.
+  if (document.hidden && video.muted) return;
   if (room && !room.playback.paused) sendControl('pause');
 });
 
@@ -134,13 +137,14 @@ setInterval(() => {
 // ---------------------------------------------------------------------------
 
 function setSource(source) {
-  const key = source.type === 'drive' ? `drive:${source.id}` : `url:${source.url}`;
+  const key = `${source.type}:${source.format}:${source.type === 'drive' ? source.id : source.url}`;
   $('video-title').textContent = source.title || 'Untitled video';
   document.title = `${source.title || 'Party'} · DriveParty`;
   if (key === sourceKey) return applyPlayback();
 
   sourceKey = key;
   videoFailed = false;
+  destroyHls();
   video.removeAttribute('src');
   video.load();
   if (source.type === 'drive') prepareDriveSource(source, key);
@@ -152,10 +156,90 @@ function retrySource() {
   setSource(room.source);
 }
 
-function loadVideo(source) {
+function destroyHls() {
+  hls?.destroy();
+  hls = null;
+}
+
+let hlsLibrary = null;
+function loadHlsLibrary() {
+  hlsLibrary ??= new Promise((resolve, reject) => {
+    const script = Object.assign(document.createElement('script'), { src: '/vendor/hls.min.js' });
+    script.onload = () => resolve(window.Hls);
+    script.onerror = () => { hlsLibrary = null; reject(new Error('Couldn\'t load the HLS player.')); };
+    document.head.append(script);
+  });
+  return hlsLibrary;
+}
+
+async function loadVideo(source) {
   showLoading();
-  video.src = sourceSrc(source);
-  video.load();
+  const src = sourceSrc(source);
+  if (source.format !== 'hls') {
+    video.src = src;
+    video.load();
+    return;
+  }
+
+  const key = sourceKey;
+  let Hls;
+  try {
+    Hls = await loadHlsLibrary();
+  } catch (err) {
+    return showProblem('Can\'t play this stream', err.message);
+  }
+  if (key !== sourceKey) return;
+
+  if (Hls.isSupported()) {
+    hls = new Hls({ maxBufferLength: 60 });
+    let recoveredMedia = false;
+    let retriedNetwork = false;
+    hls.on(Hls.Events.ERROR, (_, data) => {
+      if (!data.fatal) return;
+      if (data.type === Hls.ErrorTypes.MEDIA_ERROR && !recoveredMedia) {
+        recoveredMedia = true;
+        return hls.recoverMediaError();
+      }
+      if (data.type === Hls.ErrorTypes.NETWORK_ERROR && !retriedNetwork && data.details !== Hls.ErrorDetails.MANIFEST_LOAD_ERROR) {
+        retriedNetwork = true;
+        return hls.startLoad();
+      }
+      handleHlsFailure(source, data);
+    });
+    hls.loadSource(src);
+    hls.attachMedia(video);
+  } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+    // Safari's built-in HLS. It bypasses the service worker, so it only works for links, not Drive.
+    if (source.type === 'drive') {
+      return showProblem('Can\'t play this stream here', 'This browser can\'t play HLS streams stored in Drive. Try Chrome, Edge, Firefox or a recent Safari.');
+    }
+    video.src = src;
+  } else {
+    showProblem('Can\'t play this stream', 'This browser doesn\'t support HLS streams.');
+  }
+}
+
+async function handleHlsFailure(source, data) {
+  const key = sourceKey;
+  videoFailed = true;
+  destroyHls();
+  if (source.type === 'drive') {
+    // Usually a file this viewer can't open yet; the access flow explains what to do.
+    const access = await checkDriveHls(source.id);
+    if (key !== sourceKey) return;
+    if (!access.ok) return retrySource();
+  }
+  const status = data.response?.code;
+  if (data.details === 'manifestLoadError' || data.details === 'manifestParsingError') {
+    return showProblem(
+      'Couldn\'t load this stream',
+      source.type === 'url'
+        ? `The playlist didn't load${status ? ` (HTTP ${status})` : ''}. The site hosting it may block playback from other websites (CORS), or the link may have expired.`
+        : 'The playlist file couldn\'t be read.',
+    );
+  }
+  if (data.type === 'networkError') return showProblem('Lost connection to the stream', `A part of the stream failed to load${status ? ` (HTTP ${status})` : ''}.`);
+  showProblem('This stream can\'t be played', 'Your browser can\'t decode this stream\'s video or audio format.');
 }
 
 /** Each viewer streams Drive videos with their own Google account, so check they can open this one. */
@@ -170,7 +254,35 @@ async function prepareDriveSource(source, key) {
     return;
   }
   if (key !== sourceKey) return;
+  if (access.ok && source.format === 'hls') {
+    showLoading('Checking stream files…');
+    access = await checkDriveHls(source.id);
+    if (key !== sourceKey) return;
+  }
   if (access.ok) return loadVideo(source);
+
+  if (access.reason === 'hls-missing') {
+    const count = access.missing.length;
+    const message = el('p', {
+      textContent: access.folderId
+        ? `This stream is made of many files, and ${count} of them ${count === 1 ? 'hasn\'t' : 'haven\'t'} been opened with DriveParty on your account yet. Select every file in the stream's folder to continue.`
+        : 'This stream is made of many files, but its folder isn\'t shared with you. Ask the owner to share the whole folder.',
+    });
+    const select = el('button', { className: 'btn primary', textContent: 'Select the stream files' });
+    select.addEventListener('click', async () => {
+      select.disabled = true;
+      try {
+        const picked = await pickHlsFiles({ folderId: access.folderId });
+        if (picked) retrySource();
+      } catch (err) {
+        message.textContent = err.message;
+      } finally {
+        select.disabled = false;
+      }
+    });
+    showOverlay(access.folderId ? [el('h3', { textContent: 'Open the stream files' }), message, select] : [el('h3', { textContent: 'Can\'t open this stream' }), message]);
+    return;
+  }
 
   if (access.reason === 'signed-out') {
     let consent = false;
@@ -272,7 +384,7 @@ video.addEventListener('loadedmetadata', () => {
 });
 
 video.addEventListener('error', async () => {
-  if (!room || !video.getAttribute('src')) return;
+  if (!room || !video.getAttribute('src') || hls) return; // hls.js reports its own errors
   videoFailed = true;
   const key = sourceKey;
   showLoading();
@@ -290,7 +402,9 @@ video.addEventListener('error', async () => {
     'This video can\'t be played',
     room.source.type === 'drive'
       ? 'Your browser can\'t play this file\'s format. MP4 (H.264 + AAC audio) or WebM work best. MKV, HEVC or AC3/DTS audio usually won\'t.'
-      : 'Check that the link points directly to a video file.',
+      : room.source.format === 'hls'
+        ? 'The stream didn\'t load. The link may have expired.'
+        : 'Check that the link points directly to a video file or an .m3u8 stream.',
   );
 });
 
@@ -513,7 +627,7 @@ $('change-pick').addEventListener('click', async () => {
   $('change-error').textContent = '';
   try {
     const picked = await pickDriveVideo();
-    if (picked) switchVideo({ type: 'drive', id: picked.id, title: picked.name });
+    if (picked) switchVideo({ type: 'drive', id: picked.id, format: picked.isHls ? 'hls' : 'file', title: picked.name });
   } catch (err) {
     $('change-error').textContent = err.status === 401 ? 'Sign in with Google first.' : err.message;
   }
@@ -527,14 +641,14 @@ $('change-form').addEventListener('submit', async (event) => {
     $('change-error').textContent = source?.error || 'Paste a Google Drive video link.';
     return;
   }
-  if (source.type === 'url') return switchVideo({ ...source, title: urlTitle(source.url) });
+  if (source.type === 'url') return switchVideo({ ...(await detectUrlFormat(source)), title: urlTitle(source.url) });
 
   submit.disabled = true;
   submit.textContent = 'Checking…';
   try {
     const access = await openDriveFile(source.id);
     if (!access.ok) throw new Error(accessMessage(access.reason));
-    switchVideo({ ...source, title: access.name });
+    switchVideo({ ...source, format: access.isHls ? 'hls' : 'file', title: access.name });
   } catch (err) {
     $('change-error').textContent = err.message;
   } finally {

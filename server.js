@@ -33,6 +33,7 @@ const io = new Server(server);
 
 app.use(express.json({ limit: '16kb' }));
 app.use(express.static(path.join(__dirname, 'public')));
+app.get('/vendor/hls.min.js', (req, res) => res.sendFile(path.join(__dirname, 'node_modules', 'hls.js', 'dist', 'hls.min.js')));
 app.get('/party/:code', (req, res) => res.sendFile(path.join(__dirname, 'public', 'party.html')));
 
 // ---------------------------------------------------------------------------
@@ -195,11 +196,12 @@ function cleanText(value, max) {
 function validateSource(input) {
   if (!input || typeof input !== 'object') return null;
   const title = cleanText(input.title, 200);
-  if (input.type === 'drive' && DRIVE_ID.test(input.id)) return { type: 'drive', id: input.id, title };
+  const format = input.format === 'hls' ? 'hls' : 'file';
+  if (input.type === 'drive' && DRIVE_ID.test(input.id)) return { type: 'drive', id: input.id, format, title };
   if (input.type === 'url') {
     try {
       const url = new URL(input.url);
-      if (url.protocol === 'http:' || url.protocol === 'https:') return { type: 'url', url: url.href, title };
+      if (url.protocol === 'http:' || url.protocol === 'https:') return { type: 'url', url: url.href, format, title };
     } catch {}
   }
   return null;

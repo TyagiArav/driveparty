@@ -13,7 +13,18 @@ Everyone signs in with their own Google account and streams the video **directly
 
 DriveParty only asks for access to **the files each person picks**, not their whole Drive.
 
-Browsers play MP4 (H.264 video + AAC audio) and WebM reliably. MKV files, HEVC/H.265 video, or AC3/DTS audio often won't play; convert them with HandBrake (preset "Fast 1080p30") first.
+Browsers play MP4 (H.264 video + AAC audio), WebM and HLS streams reliably. MKV files, HEVC/H.265 video, or AC3/DTS audio often won't play; convert them with HandBrake (preset "Fast 1080p30") first.
+
+## HLS streams (.m3u8)
+
+**HLS links.** Paste an `.m3u8` link when creating a party or changing the video. It plays with [hls.js](https://github.com/video-dev/hls.js) (or Safari's built-in HLS), and each viewer loads it straight from the host, so no sign-in is needed and no bandwidth goes through DriveParty. The host has to allow playback from other websites (CORS); most streaming CDNs do. Signed links that expire will stop working for guests who join later.
+
+**HLS in Google Drive.** Upload the playlist and all of its files into **one Drive folder**, share the folder with your friends, then choose the `.m3u8` file in the picker (it's under **All files**). DriveParty finds each file the playlist mentions by name in that folder, so:
+
+- Keep every file (variant playlists, segments, keys, `init.mp4`) directly in that folder, with unique names. Subfolders in playlist paths are fine as long as the file names don't repeat.
+- Because DriveParty only gets access to files each person selects, everyone is asked once to **select all the stream's files** in the picker: click the first file, then Shift-click the last.
+
+Hundreds of segment files make that selection slow. For Drive, a single MP4 is simplest; if you need HLS, fewer, longer segments (e.g. 10 seconds) help.
 
 ## Google setup (one time, ~10 minutes)
 
@@ -63,6 +74,8 @@ cloudflared tunnel --url http://localhost:3000
 ## How it works
 
 **Streaming.** A `<video>` element can't attach a Google access token to its requests, so the page installs a service worker (`public/sw.js`). The video loads `/media/drive/<file id>`; the worker catches those requests and re-sends them to the Drive API with the viewer's token and the requested byte range. That's how seeking works without downloading the whole file. Google hides the `Content-Range` header from browsers, so the worker rebuilds it from the file size.
+
+**HLS from Drive.** The worker also serves `/media/drive-hls/<playlist id>/<file name>`. It lists the files in the playlist's folder that the viewer has opened with DriveParty, matches the name, and streams that file, so hls.js can follow the playlist's relative paths as if it were a normal web folder.
 
 **Sign-in.** Google's sign-in popup returns a one-time code. The server exchanges it for a refresh token, encrypts it with `SESSION_SECRET`, and stores it in the viewer's own cookie; the server keeps no user database. The worker asks `/api/token` for a fresh hour-long access token whenever it needs one, so long movies keep playing.
 

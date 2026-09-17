@@ -1,4 +1,4 @@
-import { parseSource, urlTitle, extractCode, savedName, saveName, toast } from './common.js';
+import { parseSource, detectUrlFormat, urlTitle, extractCode, savedName, saveName, toast } from './common.js';
 import {
   initGoogle, getMe, signIn, signOut, pickDriveVideo, openDriveFile, accessMessage, NeedsConsentError,
 } from './google.js';
@@ -68,7 +68,7 @@ $('pick-btn').addEventListener('click', async () => {
   try {
     const picked = await pickDriveVideo();
     if (!picked) return;
-    await createParty({ type: 'drive', id: picked.id, title: picked.name });
+    await createParty({ type: 'drive', id: picked.id, format: picked.isHls ? 'hls' : 'file', title: picked.name });
   } catch (err) {
     createError.textContent = err.message || 'Something went wrong.';
   } finally {
@@ -79,7 +79,7 @@ $('pick-btn').addEventListener('click', async () => {
 $('create-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   createError.textContent = '';
-  const source = parseSource($('create-link').value);
+  let source = parseSource($('create-link').value);
   if (!source || source.error) {
     createError.textContent = source?.error || 'Paste a Google Drive video link.';
     return;
@@ -91,8 +91,9 @@ $('create-form').addEventListener('submit', async (event) => {
       const access = await openDriveFile(source.id);
       if (!access.ok) throw new Error(accessMessage(access.reason, me?.email));
       source.title = access.name;
+      source.format = access.isHls ? 'hls' : 'file';
     } else {
-      source.title = urlTitle(source.url);
+      source = { ...(await detectUrlFormat(source)), title: urlTitle(source.url) };
     }
     await createParty(source);
   } catch (err) {
