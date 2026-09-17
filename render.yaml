@@ -9,5 +9,13 @@ services:
     envVars:
       - key: NODE_VERSION
         value: "22"
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
       - key: GOOGLE_API_KEY
         sync: false
+      - key: GOOGLE_PROJECT_NUMBER
+        sync: false
+      - key: SESSION_SECRET
+        generateValue: true

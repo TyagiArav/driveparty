@@ -1,6 +1,10 @@
 import {
-  parseSource, sourceSrc, inspectSource, formatTime, savedName, saveName, toast, copyText,
+  parseSource, sourceSrc, urlTitle, formatTime, savedName, saveName, toast, copyText,
 } from './common.js';
+import {
+  initGoogle, getMe, signIn, signOut, checkDriveAccess, openDriveFile, pickDriveVideo, ensureMediaWorker,
+  accessMessage, NeedsConsentError,
+} from './google.js';
 
 const $ = (id) => document.getElementById(id);
 const code = decodeURIComponent(location.pathname.split('/').filter(Boolean).pop() || '').toUpperCase();
@@ -137,9 +141,81 @@ function setSource(source) {
 
   sourceKey = key;
   videoFailed = false;
+  video.removeAttribute('src');
+  video.load();
+  if (source.type === 'drive') prepareDriveSource(source, key);
+  else loadVideo(source);
+}
+
+function retrySource() {
+  sourceKey = '';
+  setSource(room.source);
+}
+
+function loadVideo(source) {
   showLoading();
   video.src = sourceSrc(source);
   video.load();
+}
+
+/** Each viewer streams Drive videos with their own Google account, so check they can open this one. */
+async function prepareDriveSource(source, key) {
+  showLoading('Opening from Google Drive…');
+  let access;
+  try {
+    await ensureMediaWorker();
+    access = await checkDriveAccess(source.id);
+  } catch (err) {
+    if (key === sourceKey) showProblem('Can\'t play video here', err.message);
+    return;
+  }
+  if (key !== sourceKey) return;
+  if (access.ok) return loadVideo(source);
+
+  if (access.reason === 'signed-out') {
+    let consent = false;
+    const button = el('button', { className: 'btn google' }, ['Sign in with Google']);
+    button.addEventListener('click', () => {
+      signIn({ consent })
+        .then(() => key === sourceKey && retrySource())
+        .catch((err) => {
+          consent = err instanceof NeedsConsentError;
+          if (consent) button.textContent = 'Finish signing in';
+          toast(err.message);
+        });
+    });
+    showOverlay([
+      el('h3', { textContent: 'Sign in to watch' }),
+      el('p', { textContent: 'Everyone streams the video from Google Drive with their own account. Sign in with the Google account the video is shared with.' }),
+      button,
+    ]);
+    return;
+  }
+
+  if (access.reason === 'no-access') {
+    const account = await getMe();
+    if (key !== sourceKey) return;
+    const message = el('p', { textContent: `Select the video in Google's picker so DriveParty can open it. It needs to be shared with ${account.email || 'your Google account'}.` });
+    const open = el('button', { className: 'btn primary', textContent: 'Open it from Google Drive' });
+    open.addEventListener('click', async () => {
+      open.disabled = true;
+      try {
+        const result = await openDriveFile(source.id);
+        if (result.ok) return retrySource();
+        message.textContent = accessMessage(result.reason, account.email);
+      } catch (err) {
+        message.textContent = err.message;
+      } finally {
+        open.disabled = false;
+      }
+    });
+    const switchAccount = el('button', { className: 'link-btn', textContent: 'Use a different Google account' });
+    switchAccount.addEventListener('click', () => signOut().then(retrySource));
+    showOverlay([el('h3', { textContent: 'Open this video' }), message, open, switchAccount]);
+    return;
+  }
+
+  showProblem(access.reason === 'not-video' ? 'This file isn\'t a video' : 'Couldn\'t reach Google Drive', accessMessage(access.reason));
 }
 
 function showOverlay(content) {
@@ -157,8 +233,20 @@ function el(tag, props = {}, children = []) {
   return node;
 }
 
-function showLoading() {
-  showOverlay([el('div', { className: 'spinner' }), el('p', { textContent: 'Loading video…' })]);
+function showLoading(text = 'Loading video…') {
+  showOverlay([el('div', { className: 'spinner' }), el('p', { textContent: text })]);
+}
+
+function showProblem(heading, message) {
+  const retry = el('button', { className: 'btn primary', textContent: 'Retry' });
+  retry.addEventListener('click', retrySource);
+  const change = el('button', { className: 'btn', textContent: 'Change video' });
+  change.addEventListener('click', openChangeModal);
+  showOverlay([
+    el('h3', { textContent: heading }),
+    el('p', { textContent: message }),
+    el('div', { className: 'row' }, [retry, change]),
+  ]);
 }
 
 function setPlayBlocked(blocked) {
@@ -186,34 +274,24 @@ video.addEventListener('loadedmetadata', () => {
 video.addEventListener('error', async () => {
   if (!room || !video.getAttribute('src')) return;
   videoFailed = true;
+  const key = sourceKey;
   showLoading();
 
-  let heading = 'This video can\'t be played';
-  let message = 'Check the link and try again.';
   if (room.source.type === 'drive') {
-    const info = await inspectSource(room.source);
-    if (!info.ok) {
-      message = info.error;
-    } else if (video.error?.code === MediaError.MEDIA_ERR_NETWORK) {
-      heading = 'Lost connection to the video';
-      message = 'The stream was interrupted.';
-    } else {
-      message = 'The file is reachable, but your browser can\'t play its format. MP4 (H.264 + AAC audio) or WebM work best. MKV, HEVC or AC3/DTS audio usually won\'t.';
-    }
+    const access = await checkDriveAccess(room.source.id);
+    if (key !== sourceKey) return;
+    // Lost access or got signed out: show the sign-in / open-file steps again.
+    if (!access.ok) return retrySource();
   }
-
-  const retry = el('button', { className: 'btn primary', textContent: 'Retry' });
-  retry.addEventListener('click', () => {
-    sourceKey = '';
-    setSource(room.source);
-  });
-  const change = el('button', { className: 'btn', textContent: 'Change video' });
-  change.addEventListener('click', openChangeModal);
-  showOverlay([
-    el('h3', { textContent: heading }),
-    el('p', { textContent: message }),
-    el('div', { className: 'row', style: 'display:flex;gap:8px' }, [retry, change]),
-  ]);
+  if (video.error?.code === MediaError.MEDIA_ERR_NETWORK) {
+    return showProblem('Lost connection to the video', 'The stream was interrupted.');
+  }
+  showProblem(
+    'This video can\'t be played',
+    room.source.type === 'drive'
+      ? 'Your browser can\'t play this file\'s format. MP4 (H.264 + AAC audio) or WebM work best. MKV, HEVC or AC3/DTS audio usually won\'t.'
+      : 'Check that the link points directly to a video file.',
+  );
 });
 
 let pillTimer;
@@ -424,6 +502,23 @@ function openChangeModal() {
 }
 
 $('change-btn').addEventListener('click', openChangeModal);
+function switchVideo(source) {
+  socket.emit('source', source, (res) => {
+    if (res?.error) $('change-error').textContent = res.error;
+    else closeModals();
+  });
+}
+
+$('change-pick').addEventListener('click', async () => {
+  $('change-error').textContent = '';
+  try {
+    const picked = await pickDriveVideo();
+    if (picked) switchVideo({ type: 'drive', id: picked.id, title: picked.name });
+  } catch (err) {
+    $('change-error').textContent = err.status === 401 ? 'Sign in with Google first.' : err.message;
+  }
+});
+
 $('change-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   const submit = $('change-submit');
@@ -432,19 +527,20 @@ $('change-form').addEventListener('submit', async (event) => {
     $('change-error').textContent = source?.error || 'Paste a Google Drive video link.';
     return;
   }
+  if (source.type === 'url') return switchVideo({ ...source, title: urlTitle(source.url) });
+
   submit.disabled = true;
   submit.textContent = 'Checking…';
-  const info = await inspectSource(source);
-  submit.disabled = false;
-  submit.textContent = 'Switch video';
-  if (!info.ok) {
-    $('change-error').textContent = info.error;
-    return;
+  try {
+    const access = await openDriveFile(source.id);
+    if (!access.ok) throw new Error(accessMessage(access.reason));
+    switchVideo({ ...source, title: access.name });
+  } catch (err) {
+    $('change-error').textContent = err.message;
+  } finally {
+    submit.disabled = false;
+    submit.textContent = 'Switch video';
   }
-  socket.emit('source', { ...source, title: info.title }, (res) => {
-    if (res?.error) $('change-error').textContent = res.error;
-    else closeModals();
-  });
 });
 
 function toggleFullscreen() {
@@ -513,4 +609,5 @@ $('join-form').addEventListener('submit', (event) => {
   socket.connect();
 });
 
+initGoogle();
 prepareJoin();

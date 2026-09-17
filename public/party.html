@@ -86,7 +86,7 @@
         <button class="btn primary" id="copy-link">Copy link</button>
       </div>
       <div class="warn hidden" id="localhost-warn">
-        You opened this at <b>localhost</b>, so this link only works on your computer. Share your network address or a tunnel URL instead (see the README).
+        You opened this at <b>localhost</b>, so this link only works on your computer. Share your Render URL or a tunnel URL instead (see the README).
       </div>
       <div class="actions-row"><button class="btn" data-close>Done</button></div>
     </div>
@@ -95,7 +95,9 @@
   <div class="modal hidden" id="change-modal">
     <form class="card" id="change-form" novalidate>
       <h2>Change video</h2>
-      <p class="hint">Everyone in the party switches to the new video.</p>
+      <p class="hint">Everyone in the party switches to the new video. It needs to be shared with everyone's Google account.</p>
+      <button class="btn primary" type="button" id="change-pick">Choose from Google Drive</button>
+      <div class="divider"><span>or paste a link</span></div>
       <div class="field">
         <label for="change-link">Google Drive video link</label>
         <input class="input" id="change-link" placeholder="https://drive.google.com/file/d/…/view" autocomplete="off">
@@ -103,7 +105,7 @@
       <p class="error" id="change-error"></p>
       <div class="actions-row">
         <button class="btn" type="button" data-close>Cancel</button>
-        <button class="btn primary" type="submit" id="change-submit">Switch video</button>
+        <button class="btn" type="submit" id="change-submit">Switch video</button>
       </div>
     </form>
   </div>

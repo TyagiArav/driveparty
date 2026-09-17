@@ -1,18 +1,33 @@
 import express from 'express';
 import { createServer } from 'node:http';
-import { Readable } from 'node:stream';
 import crypto from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Server } from 'socket.io';
 
+try {
+  process.loadEnvFile();
+} catch {}
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3000;
-// Optional. With a key, Drive files stream through the official Drive API,
-// which is more reliable for large files than the public download endpoint.
-const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY || '';
+
+// Google Cloud credentials. See README → "Google setup".
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
+const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY || ''; // browser key, used by the Drive file picker
+const GOOGLE_PROJECT_NUMBER = process.env.GOOGLE_PROJECT_NUMBER || '';
+const GOOGLE_CONFIGURED = Boolean(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET && GOOGLE_API_KEY && GOOGLE_PROJECT_NUMBER);
+
+const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
+if (!process.env.SESSION_SECRET) console.warn('SESSION_SECRET is not set; everyone will be signed out when the server restarts.');
+
+const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
+const SESSION_COOKIE = 'dp_session';
+const SESSION_MAX_AGE = 180 * 24 * 60 * 60 * 1000;
 
 const app = express();
+app.set('trust proxy', 1);
 const server = createServer(app);
 const io = new Server(server);
 
@@ -21,134 +36,139 @@ app.use(express.static(path.join(__dirname, 'public')));
 app.get('/party/:code', (req, res) => res.sendFile(path.join(__dirname, 'public', 'party.html')));
 
 // ---------------------------------------------------------------------------
-// Google Drive streaming proxy
+// Google sign-in
+//
+// Video never passes through this server. Each viewer signs in with Google and
+// their browser streams the Drive file directly (see public/sw.js). The server
+// only keeps the viewer's refresh token, encrypted inside their own cookie, and
+// trades it for short-lived access tokens.
 // ---------------------------------------------------------------------------
 
 const DRIVE_ID = /^[\w-]{10,}$/;
+const sessionKey = crypto.createHash('sha256').update(SESSION_SECRET).digest();
 
-class DriveError extends Error {
-  constructor(message, status = 502) {
-    super(message);
-    this.status = status;
-  }
+function seal(data) {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', sessionKey, iv);
+  const body = Buffer.concat([cipher.update(JSON.stringify(data), 'utf8'), cipher.final()]);
+  return Buffer.concat([iv, cipher.getAuthTag(), body]).toString('base64url');
 }
 
-function explainHtmlResponse(html, finalUrl) {
-  if (finalUrl.includes('accounts.google.com') || /ServiceLogin|Sign in/i.test(html)) {
-    return new DriveError('This file is not public. In Google Drive, set sharing to "Anyone with the link".', 403);
-  }
-  if (/quota|Too many users/i.test(html)) {
-    return new DriveError('Google Drive download quota exceeded for this file. Try again later or make a copy of the file.', 429);
-  }
-  if (/not found|does not exist|404/i.test(html)) {
-    return new DriveError('File not found. Check the link.', 404);
-  }
-  return new DriveError('Google Drive refused to stream this file.', 502);
-}
-
-/** Fetch a Drive file's bytes, following the "can't scan for viruses" interstitial if needed. */
-async function fetchDriveFile(id, range, signal) {
-  const headers = range ? { Range: range } : {};
-
-  if (GOOGLE_API_KEY) {
-    const res = await fetch(
-      `https://www.googleapis.com/drive/v3/files/${id}?alt=media&supportsAllDrives=true&acknowledgeAbuse=true&key=${GOOGLE_API_KEY}`,
-      { headers, signal },
-    );
-    if (res.ok) return res;
-    await res.body?.cancel();
-    // Fall through to the public endpoint.
-  }
-
-  let url = `https://drive.usercontent.google.com/download?id=${id}&export=download&confirm=t`;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const res = await fetch(url, { headers, signal, redirect: 'follow' });
-    const type = res.headers.get('content-type') || '';
-    if (!type.includes('text/html')) {
-      if (!res.ok) {
-        await res.body?.cancel();
-        throw new DriveError(`Google Drive responded with ${res.status}.`, res.status === 404 ? 404 : 502);
-      }
-      return res;
-    }
-    const html = await res.text();
-    if (new URL(res.url).hostname !== 'drive.usercontent.google.com') throw explainHtmlResponse(html, res.url);
-    const form = html.match(/<form[^>]*id="download-form"[^>]*action="([^"]+)"/) || html.match(/<form[^>]*action="([^"]+)"/);
-    if (!form) throw explainHtmlResponse(html, res.url);
-    const params = new URLSearchParams();
-    for (const m of html.matchAll(/<input[^>]*type="hidden"[^>]*name="([^"]+)"[^>]*value="([^"]*)"/g)) {
-      params.set(m[1], m[2]);
-    }
-    url = `${form[1].replace(/&amp;/g, '&')}?${params}`;
-  }
-  throw new DriveError('Could not get past Google Drive\'s download confirmation page.');
-}
-
-function filenameFromDisposition(value) {
-  if (!value) return '';
-  const star = value.match(/filename\*=UTF-8''([^;]+)/i);
-  if (star) return decodeURIComponent(star[1]);
-  const plain = value.match(/filename="?([^";]+)"?/i);
-  // Header bytes arrive as latin1; Drive sends raw UTF-8.
-  return plain ? Buffer.from(plain[1], 'latin1').toString('utf8') : '';
-}
-
-const NON_VIDEO_EXT = /^(pdf|docx?|xlsx?|pptx?|txt|csv|jpe?g|png|gif|webp|heic|zip|rar|7z|mp3|wav|m4a|flac|aac)$/;
-const MIME_BY_EXT = { mp4: 'video/mp4', m4v: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime', mkv: 'video/x-matroska', ogv: 'video/ogg' };
-
-app.get('/api/drive/:id/info', async (req, res) => {
-  const { id } = req.params;
-  if (!DRIVE_ID.test(id)) return res.status(400).json({ ok: false, error: 'Invalid Google Drive file ID.' });
+function unseal(value) {
   try {
-    const upstream = await fetchDriveFile(id, 'bytes=0-0', AbortSignal.timeout(15000));
-    const name = filenameFromDisposition(upstream.headers.get('content-disposition'));
-    const ext = name.split('.').pop().toLowerCase();
-    if (!(upstream.headers.get('content-type') || '').match(/video|octet|binary|matroska/) || NON_VIDEO_EXT.test(ext)) {
-      await upstream.body?.cancel();
-      return res.status(415).json({ ok: false, error: 'That Drive file doesn\'t look like a video.' });
-    }
-    await upstream.body?.cancel();
-    const total = upstream.headers.get('content-range')?.split('/')[1];
-    res.json({
-      ok: true,
-      name: name || 'Google Drive video',
-      size: total && total !== '*' ? Number(total) : null,
-      mimeType: upstream.headers.get('content-type'),
-    });
-  } catch (err) {
-    if (!(err instanceof DriveError)) console.error('Drive info failed:', err);
-    res.status(err.status || 502).json({ ok: false, error: err instanceof DriveError ? err.message : 'Could not reach Google Drive.' });
+    const raw = Buffer.from(value, 'base64url');
+    const decipher = crypto.createDecipheriv('aes-256-gcm', sessionKey, raw.subarray(0, 12));
+    decipher.setAuthTag(raw.subarray(12, 28));
+    return JSON.parse(Buffer.concat([decipher.update(raw.subarray(28)), decipher.final()]).toString('utf8'));
+  } catch {
+    return null;
   }
+}
+
+function readCookie(req, name) {
+  for (const part of (req.headers.cookie || '').split(';')) {
+    const [key, ...rest] = part.trim().split('=');
+    if (key === name) return rest.join('=');
+  }
+  return '';
+}
+
+function getSession(req) {
+  const cookie = readCookie(req, SESSION_COOKIE);
+  return cookie ? { cookie, data: unseal(cookie) } : { cookie: '', data: null };
+}
+
+function clearSession(res) {
+  res.clearCookie(SESSION_COOKIE, { path: '/' });
+}
+
+async function googleToken(params) {
+  const res = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ client_id: GOOGLE_CLIENT_ID, client_secret: GOOGLE_CLIENT_SECRET, ...params }),
+  });
+  return { ok: res.ok, data: await res.json().catch(() => ({})) };
+}
+
+app.get('/api/config', (req, res) => {
+  res.json({
+    configured: GOOGLE_CONFIGURED,
+    clientId: GOOGLE_CLIENT_ID,
+    apiKey: GOOGLE_API_KEY,
+    appId: GOOGLE_PROJECT_NUMBER,
+    scope: `openid email profile ${DRIVE_SCOPE}`,
+  });
 });
 
-app.get('/api/drive/:id/stream', async (req, res) => {
-  const { id } = req.params;
-  if (!DRIVE_ID.test(id)) return res.status(400).json({ error: 'Invalid Google Drive file ID.' });
+app.post('/auth/google', async (req, res) => {
+  // The popup code flow requires this header, which cross-site forms can't send.
+  if (req.get('x-requested-with') !== 'XmlHttpRequest') return res.status(400).json({ error: 'Bad request.' });
+  if (!GOOGLE_CONFIGURED) return res.status(503).json({ error: 'Google sign-in isn\'t set up on this server.' });
+  const code = String(req.body?.code || '');
+  if (!code) return res.status(400).json({ error: 'Missing sign-in code.' });
 
-  const controller = new AbortController();
-  res.on('close', () => controller.abort());
-
-  try {
-    const upstream = await fetchDriveFile(id, req.headers.range, controller.signal);
-    res.status(upstream.status);
-    for (const header of ['content-length', 'content-range', 'last-modified', 'etag']) {
-      const value = upstream.headers.get(header);
-      if (value) res.setHeader(header, value);
-    }
-    let type = upstream.headers.get('content-type') || 'application/octet-stream';
-    if (!type.startsWith('video/')) {
-      const ext = filenameFromDisposition(upstream.headers.get('content-disposition')).split('.').pop()?.toLowerCase();
-      type = MIME_BY_EXT[ext] || type;
-    }
-    res.setHeader('content-type', type);
-    res.setHeader('accept-ranges', 'bytes');
-    res.setHeader('cache-control', 'private, max-age=3600');
-    Readable.fromWeb(upstream.body).on('error', () => res.destroy()).pipe(res);
-  } catch (err) {
-    if (controller.signal.aborted || res.headersSent) return;
-    res.status(err.status || 502).json({ error: err instanceof DriveError ? err.message : 'Could not reach Google Drive.' });
+  const { ok, data } = await googleToken({ code, grant_type: 'authorization_code', redirect_uri: 'postmessage' });
+  if (!ok) return res.status(400).json({ error: 'Google sign-in failed. Try again.' });
+  if (!String(data.scope || '').includes(DRIVE_SCOPE)) {
+    return res.status(400).json({ error: 'DriveParty needs permission to open the Drive files you choose. Sign in again and leave that box checked.', needConsent: true });
   }
+  // Google only issues a refresh token on first consent; ask again if this device didn't get one.
+  if (!data.refresh_token) return res.status(409).json({ needConsent: true });
+
+  const profile = JSON.parse(Buffer.from(String(data.id_token).split('.')[1] || '', 'base64url').toString('utf8') || '{}');
+  const session = { rt: data.refresh_token, email: profile.email || '', name: profile.given_name || profile.name || '', picture: profile.picture || '' };
+  const cookie = seal(session);
+  tokenCache.set(cookie, { accessToken: data.access_token, expiresAt: Date.now() + data.expires_in * 1000 });
+  res.cookie(SESSION_COOKIE, cookie, { httpOnly: true, sameSite: 'lax', secure: req.secure, maxAge: SESSION_MAX_AGE, path: '/' });
+  res.json({ signedIn: true, email: session.email, name: session.name, picture: session.picture });
 });
+
+app.post('/auth/logout', (req, res) => {
+  const { cookie } = getSession(req);
+  tokenCache.delete(cookie);
+  clearSession(res);
+  res.json({ signedIn: false });
+});
+
+app.get('/api/me', (req, res) => {
+  const { data } = getSession(req);
+  if (!data) return res.json({ signedIn: false });
+  res.json({ signedIn: true, email: data.email, name: data.name, picture: data.picture });
+});
+
+const tokenCache = new Map(); // session cookie -> { accessToken, expiresAt }
+
+app.get('/api/token', async (req, res) => {
+  res.setHeader('cache-control', 'no-store');
+  const { cookie, data } = getSession(req);
+  if (!data) {
+    if (cookie) clearSession(res);
+    return res.status(401).json({ error: 'Not signed in.' });
+  }
+
+  const cached = tokenCache.get(cookie);
+  if (cached && cached.expiresAt - 120_000 > Date.now()) {
+    return res.json({ accessToken: cached.accessToken, expiresIn: Math.floor((cached.expiresAt - Date.now()) / 1000) });
+  }
+
+  const result = await googleToken({ refresh_token: data.rt, grant_type: 'refresh_token' });
+  if (!result.ok) {
+    tokenCache.delete(cookie);
+    if (result.data.error === 'invalid_grant') {
+      clearSession(res);
+      return res.status(401).json({ error: 'Your Google sign-in expired. Sign in again.' });
+    }
+    return res.status(502).json({ error: 'Couldn\'t reach Google.' });
+  }
+  const entry = { accessToken: result.data.access_token, expiresAt: Date.now() + result.data.expires_in * 1000 };
+  tokenCache.set(cookie, entry);
+  res.json({ accessToken: entry.accessToken, expiresIn: result.data.expires_in });
+});
+
+setInterval(() => {
+  for (const [key, entry] of tokenCache) if (entry.expiresAt < Date.now()) tokenCache.delete(key);
+}, 10 * 60 * 1000).unref();
 
 // ---------------------------------------------------------------------------
 // Parties
@@ -329,5 +349,5 @@ setInterval(() => {
 
 server.listen(PORT, () => {
   console.log(`DriveParty running at http://localhost:${PORT}`);
-  if (!GOOGLE_API_KEY) console.log('Tip: set GOOGLE_API_KEY for more reliable streaming of large Drive files.');
+  if (!GOOGLE_CONFIGURED) console.log('Google sign-in is not configured. Copy .env.example to .env and fill it in (see README).');
 });

@@ -17,18 +17,16 @@ export function parseSource(input) {
 }
 
 export function sourceSrc(source) {
-  return source.type === 'drive' ? `/api/drive/${encodeURIComponent(source.id)}/stream` : source.url;
+  // Served by the streaming service worker (sw.js) straight from Google.
+  return source.type === 'drive' ? `/media/drive/${encodeURIComponent(source.id)}` : source.url;
 }
 
-/** Resolve a title for a source, validating Drive files are reachable. */
-export async function inspectSource(source) {
-  if (source.type !== 'drive') {
-    const name = decodeURIComponent(new URL(source.url).pathname.split('/').pop() || '') || 'Video';
-    return { ok: true, title: name };
+export function urlTitle(url) {
+  try {
+    return decodeURIComponent(new URL(url).pathname.split('/').pop() || '') || 'Video';
+  } catch {
+    return 'Video';
   }
-  const res = await fetch(`/api/drive/${encodeURIComponent(source.id)}/info`);
-  const data = await res.json().catch(() => ({ ok: false, error: 'Could not check that file.' }));
-  return data.ok ? { ok: true, title: data.name, size: data.size } : { ok: false, error: data.error };
 }
 
 export function formatTime(seconds) {

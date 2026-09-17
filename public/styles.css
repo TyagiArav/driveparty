@@ -386,3 +386,45 @@ button, input { font: inherit; color: inherit; }
   .chat-head, .messages, .composer { width: auto; }
   .stage.chat-closed .player { aspect-ratio: auto; }
 }
+
+/* ---------- Google sign-in ---------- */
+
+.stack { display: grid; gap: 14px; }
+.row { display: flex; gap: 8px; }
+.row .input { flex: 1; min-width: 0; }
+
+.btn.google { background: #fff; color: #1f1f1f; border-color: #fff; }
+.btn.google:hover { background: #ececf1; }
+
+.account {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  font-size: 14px;
+  color: var(--muted);
+}
+.account img { width: 28px; height: 28px; border-radius: 50%; background: var(--surface-2); flex: none; }
+.account img:not([src]) { visibility: hidden; }
+.account span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.account b { color: var(--text); font-weight: 600; }
+
+.link-btn {
+  border: 0;
+  background: none;
+  padding: 0;
+  color: var(--muted);
+  text-decoration: underline;
+  cursor: pointer;
+  font-size: 13px;
+}
+.link-btn:hover { color: var(--text); }
+
+.divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.divider::before, .divider::after { content: ''; flex: 1; height: 1px; background: var(--border); }
