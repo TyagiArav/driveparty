@@ -373,6 +373,15 @@ button, input { font: inherit; color: inherit; }
   color: #ffd166;
   font-size: 13px;
 }
+.sharing {
+  display: grid;
+  gap: 8px;
+  justify-items: start;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+}
+.sharing .error:empty { display: none; }
 
 /* ---------- Small screens ---------- */
 

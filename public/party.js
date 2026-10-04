@@ -2,8 +2,8 @@ import {
   parseSource, detectUrlFormat, sourceSrc, urlTitle, formatTime, savedName, saveName, toast, copyText,
 } from './common.js';
 import {
-  initGoogle, getMe, signIn, signOut, checkDriveAccess, checkDriveHls, openDriveFile, pickDriveVideo, pickHlsFiles,
-  ensureMediaWorker, accessMessage, NeedsConsentError,
+  initGoogle, getMe, signIn, signOut, checkDriveAccess, checkDriveHls, checkLinkShared, enableLinkSharing,
+  openDriveFile, pickDriveVideo, pickHlsFiles, ensureMediaWorker, accessMessage, NeedsConsentError,
 } from './google.js';
 
 const $ = (id) => document.getElementById(id);
@@ -31,6 +31,7 @@ let videoFailed = false;
 let unread = 0;
 let firstJoin = true;
 let hls = null; // hls.js instance for HLS sources
+let autoPickedKey = ''; // source the Drive picker was already opened for automatically
 
 // ---------------------------------------------------------------------------
 // Clock + playback sync
@@ -324,6 +325,11 @@ async function prepareDriveSource(source, key) {
     const switchAccount = el('button', { className: 'link-btn', textContent: 'Use a different Google account' });
     switchAccount.addEventListener('click', () => signOut().then(retrySource));
     showOverlay([el('h3', { textContent: 'Open this video' }), message, open, switchAccount]);
+    // Bring up the picker, already narrowed to the party's video, without waiting for a click.
+    if (autoPickedKey !== key) {
+      autoPickedKey = key;
+      open.click();
+    }
     return;
   }
 
@@ -596,7 +602,39 @@ function openInviteModal() {
   $('invite-link').value = link;
   $('localhost-warn').classList.toggle('hidden', !['localhost', '127.0.0.1', '[::1]'].includes(location.hostname));
   openModal('invite-modal');
+  refreshSharing();
 }
+
+/** Tell the host whether guests can watch right away, or will have to select the video themselves. */
+async function refreshSharing() {
+  const box = $('invite-sharing');
+  const source = room?.source;
+  box.classList.add('hidden');
+  if (source?.type !== 'drive' || source.format === 'hls') return;
+
+  const key = sourceKey;
+  const shared = await checkLinkShared(source.id);
+  if (key !== sourceKey) return;
+  $('share-status').textContent = shared
+    ? 'Anyone with the link can view this video in Drive, so friends can start watching right away.'
+    : 'This video isn\'t shared by link, so each friend needs it shared with their Google account and has to select it once when they join.';
+  $('share-enable').classList.toggle('hidden', Boolean(shared));
+  $('share-error').textContent = '';
+  box.classList.remove('hidden');
+}
+
+$('share-enable').addEventListener('click', async () => {
+  const button = $('share-enable');
+  button.disabled = true;
+  try {
+    await enableLinkSharing(room.source.id);
+    await refreshSharing();
+  } catch (err) {
+    $('share-error').textContent = err.message;
+  } finally {
+    button.disabled = false;
+  }
+});
 
 $('invite-btn').addEventListener('click', openInviteModal);
 $('copy-link').addEventListener('click', async () => {

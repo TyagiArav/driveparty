@@ -91,18 +91,50 @@ async function getAccessToken() {
   return (await res.json()).accessToken;
 }
 
+const DRIVE_FILES = 'https://www.googleapis.com/drive/v3/files';
+
+function describeFile(file) {
+  const isHls = isHlsFile(file);
+  if (!isHls && !file.mimeType?.startsWith('video/') && file.mimeType !== 'application/octet-stream') {
+    return { ok: false, reason: 'not-video', name: file.name };
+  }
+  return { ok: true, name: file.name, mimeType: file.mimeType, size: Number(file.size), isHls };
+}
+
 /**
- * Check whether the signed-in user can stream a Drive file.
+ * Check whether a Drive file is shared as "Anyone with the link". Those can be streamed
+ * with the app's API key, so viewers don't have to sign in or select the file in the picker.
+ * Resolves like checkDriveAccess (plus linkShared: true), or null if the file isn't link-shared.
+ */
+export async function checkLinkShared(id) {
+  await initGoogle().catch(() => null);
+  if (!config?.apiKey) return null;
+  const res = await fetch(`${DRIVE_FILES}/${encodeURIComponent(id)}?fields=name,mimeType,size&supportsAllDrives=true&key=${encodeURIComponent(config.apiKey)}`).catch(() => null);
+  if (!res?.ok) return null;
+  return { ...describeFile(await res.json()), linkShared: true };
+}
+
+/**
+ * Check whether this viewer can stream a Drive file, either with their own Google
+ * account or because the file is shared as "Anyone with the link".
  * Resolves to { ok, name } or { ok: false, reason: 'signed-out' | 'no-access' | 'not-video' | 'error' }.
  */
 export async function checkDriveAccess(id) {
+  const own = await checkOwnAccess(id);
+  if (own.reason !== 'signed-out' && own.reason !== 'no-access') return own;
+  const shared = await checkLinkShared(id);
+  // HLS streams need their whole folder, which only the signed-in flow can resolve.
+  return shared && !shared.isHls ? shared : own;
+}
+
+async function checkOwnAccess(id) {
   let token;
   try {
     token = await getAccessToken();
   } catch {
     return { ok: false, reason: 'signed-out' };
   }
-  const res = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(id)}?fields=name,mimeType,size&supportsAllDrives=true`, {
+  const res = await fetch(`${DRIVE_FILES}/${encodeURIComponent(id)}?fields=name,mimeType,size&supportsAllDrives=true`, {
     headers: { Authorization: `Bearer ${token}` },
   }).catch(() => null);
   if (!res) return { ok: false, reason: 'error' };
@@ -110,12 +142,25 @@ export async function checkDriveAccess(id) {
   // With the "files you choose" permission, Drive answers 404 until the user opens the file in the picker.
   if (res.status === 403 || res.status === 404) return { ok: false, reason: 'no-access' };
   if (!res.ok) return { ok: false, reason: 'error' };
-  const file = await res.json();
-  const isHls = isHlsFile(file);
-  if (!isHls && !file.mimeType?.startsWith('video/') && file.mimeType !== 'application/octet-stream') {
-    return { ok: false, reason: 'not-video', name: file.name };
-  }
-  return { ok: true, name: file.name, mimeType: file.mimeType, size: Number(file.size), isHls };
+  return describeFile(await res.json());
+}
+
+/**
+ * Turn on "Anyone with the link can view" for a Drive file the signed-in user has opened with DriveParty.
+ * Must only be called when the user asks for it.
+ */
+export async function enableLinkSharing(id) {
+  const token = await getAccessToken().catch(() => null);
+  if (!token) throw new Error('Sign in with Google first.');
+  const res = await fetch(`${DRIVE_FILES}/${encodeURIComponent(id)}/permissions?supportsAllDrives=true`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ role: 'reader', type: 'anyone' }),
+  }).catch(() => null);
+  if (res?.ok) return;
+  throw new Error(res?.status === 403 || res?.status === 404
+    ? 'Google wouldn\'t let DriveParty change sharing on this file. Only its owner can, and some school or work accounts don\'t allow link sharing. You can still set it yourself in Drive: Share → General access → Anyone with the link.'
+    : 'Couldn\'t reach Google Drive. Try again.');
 }
 
 export function isHlsFile(file) {

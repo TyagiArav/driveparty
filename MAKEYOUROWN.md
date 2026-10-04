@@ -8,8 +8,10 @@ Everyone signs in with their own Google account and streams the video **directly
 
 1. Share the video in Google Drive with your friend's Google account.
 2. On DriveParty, sign in with Google, click **Choose a video from Google Drive**, and pick it.
-3. Send your friend the invite link. They sign in with their Google account. The first time, they click **Open it from Google Drive** and select the video in Google's picker, which gives DriveParty permission to open that one file for them.
+3. Send your friend the invite link. They sign in with their Google account. The first time, Google's picker opens showing just that video, and selecting it gives DriveParty permission to open that one file for them.
 4. Anyone can play, pause or seek, and everyone follows.
+
+**Skipping the picker.** If the video is shared as **Anyone with the link** in Drive, guests start watching immediately, with no sign-in and no picker. The Invite dialog shows whether that's the case and has a button to turn it on. The trade-off is that anyone who gets the Drive link can view the file. (This doesn't apply to HLS streams stored in Drive.)
 
 DriveParty only asks for access to **the files each person picks**, not their whole Drive.
 
@@ -41,7 +43,7 @@ DriveParty needs its own Google Cloud project for sign-in. All free.
    - Copy the **Client ID** and **Client secret**.
 5. **APIs & Services → Credentials → Create credentials → API key.** Edit the key:
    - Application restrictions: **Websites**, add `http://localhost:3000/*` and `https://driveparty-xxxx.onrender.com/*`.
-   - API restrictions: **Google Picker API** only.
+   - API restrictions: **Google Picker API** and **Google Drive API**. (The Drive API is what lets guests watch link-shared videos without selecting them; without it they fall back to the picker.)
 6. Find your **project number** on the Cloud console home page (Project info card), or under IAM & Admin → Settings.
 
 ## Run it locally

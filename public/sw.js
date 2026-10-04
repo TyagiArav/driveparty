@@ -3,7 +3,8 @@
 // A <video> element (or hls.js) can't send an Authorization header, so its
 // requests go to same-origin /media/... paths and this worker re-issues them to
 // the Drive API. Google doesn't expose Content-Range to browsers, so the worker
-// rebuilds the range headers from the file size.
+// rebuilds the range headers from the file size. Files shared as "Anyone with the
+// link" are fetched with the app's API key instead, so those need no sign-in.
 //
 //   /media/drive/<fileId>                  a single video file
 //   /media/drive-hls/<playlistId>/         the playlist itself
@@ -34,6 +35,9 @@ let token = null; // { value, expiresAt }
 let pendingToken = null;
 const fileMetadata = new Map(); // fileId -> Promise<{ id, size, mimeType }>
 const hlsIndexes = new Map(); // playlistId -> { builtAt, promise: Promise<index> }
+const SINGLE_FILE_URL = /\/drive\/v3\/files\/([\w-]+)\?/;
+const linkSharedFiles = new Set(); // file ids being read with the API key instead of the viewer's token
+let apiKey = null; // Promise<string>, the browser API key from /api/config
 
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));
@@ -43,6 +47,7 @@ self.addEventListener('message', (event) => {
     token = null;
     fileMetadata.clear();
     hlsIndexes.clear();
+    linkSharedFiles.clear();
   }
 });
 
@@ -94,12 +99,53 @@ function getToken(force) {
   return pendingToken;
 }
 
-async function driveFetch(url, headers = {}) {
+async function signedInFetch(url, headers) {
   let res;
   for (const force of [false, true]) {
     res = await fetch(url, { headers: { ...headers, Authorization: `Bearer ${await getToken(force)}` } });
     if (res.status !== 401) return res;
   }
+  return res;
+}
+
+function getApiKey() {
+  apiKey ??= fetch('/api/config')
+    .then((res) => res.json())
+    .then((config) => config.apiKey || '')
+    .catch(() => { apiKey = null; return ''; });
+  return apiKey;
+}
+
+/**
+ * Fetch from the Drive API as the signed-in viewer. For a single file they can't open that way
+ * (signed out, or not selected in the picker yet), fall back to the app's API key, which works
+ * when the file is shared as "Anyone with the link".
+ */
+async function driveFetch(url, headers = {}) {
+  const id = url.match(SINGLE_FILE_URL)?.[1];
+  let res = null;
+  if (!id || !linkSharedFiles.has(id)) {
+    try {
+      res = await signedInFetch(url, headers);
+    } catch (err) {
+      if (!id || !(err instanceof HttpError)) throw err;
+    }
+    if (!id || (res && ![401, 403, 404].includes(res.status))) return res;
+  }
+
+  const key = await getApiKey();
+  if (key) {
+    const shared = await fetch(`${url}&key=${encodeURIComponent(key)}`, { headers });
+    if (shared.ok) {
+      linkSharedFiles.add(id);
+      res?.body?.cancel();
+      return shared;
+    }
+    linkSharedFiles.delete(id);
+    if (!res) return shared;
+    shared.body?.cancel();
+  }
+  if (!res) throw new HttpError(401);
   return res;
 }
 
