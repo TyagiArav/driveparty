@@ -287,11 +287,44 @@ button, input { font: inherit; color: inherit; }
 }
 .status-pill.show { opacity: 1; transform: translate(-50%, 0); }
 
+.reaction-layer { position: absolute; inset: 0; overflow: hidden; pointer-events: none; z-index: 3; }
+.reaction-layer span {
+  position: absolute;
+  bottom: 70px;
+  font-size: clamp(28px, 4vw, 44px);
+  line-height: 1;
+  animation: float-up 3s ease-out forwards;
+  will-change: transform, opacity;
+}
+@keyframes float-up {
+  0% { transform: translate(0, 20px) scale(0.5); opacity: 0; }
+  12% { transform: translate(0, 0) scale(1.15); opacity: 1; }
+  100% { transform: translate(var(--sway, 0), var(--rise, -60vh)) scale(1); opacity: 0; }
+}
+
+.player-controls {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  display: none;
+  gap: 8px;
+  z-index: 6;
+  transition: opacity 0.25s;
+}
+.player-controls .btn { background: rgb(20 20 28 / 0.8); border-color: transparent; backdrop-filter: blur(6px); }
+
+/* Fullscreen: nothing but the video, plus the chat when it's open. */
+.is-fullscreen .party { grid-template-rows: 1fr; }
+.is-fullscreen .topbar { display: none; }
+.is-fullscreen .player-controls { display: flex; }
+.is-fullscreen .player.idle .player-controls { opacity: 0; pointer-events: none; }
+.is-fullscreen .player.idle { cursor: none; }
+
 /* ---------- Chat ---------- */
 
 .chat {
   display: grid;
-  grid-template-rows: auto 1fr auto;
+  grid-template-rows: auto 1fr auto auto;
   min-height: 0;
   min-width: 0;
   overflow: hidden;
@@ -329,6 +362,27 @@ button, input { font: inherit; color: inherit; }
 .msg.mine .body { color: #fff; }
 .msg.system { color: var(--muted); font-size: 12.5px; text-align: center; padding: 2px 0; }
 .msg.system + .msg:not(.system) { margin-top: 4px; }
+
+.reactions {
+  display: flex;
+  justify-content: space-between;
+  padding: 8px 10px 0;
+  border-top: 1px solid var(--border);
+  width: var(--chat-width);
+}
+.reactions button {
+  padding: 4px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+  transition: transform 0.1s, background 0.15s;
+}
+.reactions button:hover { background: var(--surface-2); transform: scale(1.2); }
+.reactions button:active { transform: scale(0.9); }
+.reactions + .composer { border-top: 0; }
 
 .composer {
   display: flex;
@@ -402,7 +456,7 @@ video::cue { background: rgb(0 0 0 / 0.6); }
   .player { aspect-ratio: 16 / 9; }
   .chat { border-left: 0; border-top: 1px solid var(--border); }
   .stage.chat-closed .chat { display: none; }
-  .chat-head, .messages, .composer { width: auto; }
+  .chat-head, .messages, .reactions, .composer { width: auto; }
   .stage.chat-closed .player { aspect-ratio: auto; }
 }
 

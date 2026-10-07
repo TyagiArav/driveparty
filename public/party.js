@@ -526,6 +526,7 @@ socket.on('users', (users) => {
 });
 
 socket.on('chat', (message) => addMessage(message, true));
+socket.on('reaction', floatReaction);
 
 // ---------------------------------------------------------------------------
 // Chat + people
@@ -571,9 +572,10 @@ function addMessage(message, isNew) {
 }
 
 function updateUnread() {
-  const badge = $('unread');
-  badge.textContent = unread > 9 ? '9+' : String(unread);
-  badge.classList.toggle('hidden', unread === 0);
+  for (const badge of [$('unread'), $('fs-unread')]) {
+    badge.textContent = unread > 9 ? '9+' : String(unread);
+    badge.classList.toggle('hidden', unread === 0);
+  }
 }
 
 $('composer').addEventListener('submit', (event) => {
@@ -582,6 +584,26 @@ $('composer').addEventListener('submit', (event) => {
   if (!text || !room) return;
   socket.emit('chat', text);
   chatInput.value = '';
+});
+
+/** Send an emoji drifting up over the video. */
+function floatReaction(emoji) {
+  const layer = $('reaction-layer');
+  if (layer.childElementCount >= 60) layer.firstElementChild.remove();
+  const node = el('span', { textContent: emoji });
+  node.style.left = `${50 + Math.random() * 38}%`;
+  node.style.setProperty('--sway', `${Math.round(Math.random() * 80 - 40)}px`);
+  node.style.setProperty('--rise', `${-(45 + Math.random() * 25)}vh`);
+  node.style.animationDuration = `${2.6 + Math.random() * 1.2}s`;
+  node.addEventListener('animationend', () => node.remove());
+  layer.append(node);
+}
+
+$('reactions').addEventListener('click', (event) => {
+  const emoji = event.target.closest('button')?.textContent;
+  if (!emoji || !room) return;
+  floatReaction(emoji);
+  socket.emit('reaction', emoji);
 });
 
 const CHAT_KEY = 'driveparty:chat-open';
@@ -605,6 +627,7 @@ $('chat-btn').addEventListener('click', () => {
   if (chatIsOpen() && matchMedia('(hover: hover)').matches) chatInput.focus();
 });
 $('chat-close').addEventListener('click', () => setChatOpen(false));
+$('fs-chat-btn').addEventListener('click', () => setChatOpen(!chatIsOpen()));
 
 // ---------------------------------------------------------------------------
 // Modals, fullscreen, keyboard
@@ -843,24 +866,48 @@ function toggleFullscreen() {
 }
 
 $('fullscreen-btn').addEventListener('click', toggleFullscreen);
+$('fs-exit-btn').addEventListener('click', toggleFullscreen);
 video.addEventListener('dblclick', toggleFullscreen);
 
+document.addEventListener('fullscreenchange', () => {
+  document.body.classList.toggle('is-fullscreen', Boolean(document.fullscreenElement));
+  wakePlayer();
+});
+
+// In fullscreen the floating buttons and the cursor hide once the mouse rests.
+const player = video.parentElement;
+let idleTimer;
+function wakePlayer() {
+  player.classList.remove('idle');
+  clearTimeout(idleTimer);
+  idleTimer = setTimeout(() => player.classList.add('idle'), 2500);
+}
+player.addEventListener('mousemove', wakePlayer);
+player.addEventListener('mousedown', wakePlayer);
+
+const SKIP_SECONDS = 10;
+
+// Capture phase, so these win over the native player's own keys when the video has focus.
 document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape') closeModals();
-  const typing = event.target.closest?.('input, textarea, [contenteditable]');
+  const typing = event.target.closest?.('input, textarea, select, [contenteditable]');
   if (typing || event.metaKey || event.ctrlKey || event.altKey || !room) return;
-  if (!$('join-modal').classList.contains('hidden')) return;
+  if (document.querySelector('.modal:not(.hidden)')) return;
 
   const key = event.key.toLowerCase();
   if (key === 'c') setChatOpen(!chatIsOpen());
   else if (key === 'f') toggleFullscreen();
-  else if (document.activeElement === video) return; // the native player handles its own keys
-  else if (key === ' ' || key === 'k') video.paused ? video.play() : video.pause();
-  else if (key === 'arrowleft') video.currentTime = Math.max(0, video.currentTime - 10);
-  else if (key === 'arrowright') video.currentTime = Math.min(video.duration || Infinity, video.currentTime + 10);
+  else if (key === ' ' || key === 'k') video.paused ? video.play().catch(() => {}) : video.pause();
+  else if (key === 'arrowleft') video.currentTime = Math.max(0, video.currentTime - SKIP_SECONDS);
+  else if (key === 'arrowright') video.currentTime = Math.min(video.duration || Infinity, video.currentTime + SKIP_SECONDS);
   else return;
   event.preventDefault();
-});
+  event.stopPropagation();
+}, true);
+// A focused button would otherwise also "click" when Space is released.
+document.addEventListener('keyup', (event) => {
+  if (event.key === ' ' && room && event.target.closest?.('button') && !document.querySelector('.modal:not(.hidden)')) event.preventDefault();
+}, true);
 
 // ---------------------------------------------------------------------------
 // Join

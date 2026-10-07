@@ -60,6 +60,7 @@ They sign in, and you're in sync. Whoever presses play, everyone plays.
 | ⏯️ **Shared controls** | Play, pause and seek from any viewer, reflected for everyone instantly |
 | 🎯 **Drift correction** | Quietly nudges any viewer who drifts out of sync back into step |
 | 💬 **Live chat** | Toggleable sidebar with unread badges and pop-up previews when it's hidden |
+| 🎉 **Reactions** | Tap an emoji and it floats up over the video on everyone's screen |
 | 🔗 **Easy invites** | Share a link or a short party code |
 | 🔒 **Private by design** | DriveParty can only open the specific files you pick, never your whole Drive |
 | 🔤 **Subtitles** | Add an `.srt` or `.vtt` file from Drive or your device, and everyone in the party sees it |

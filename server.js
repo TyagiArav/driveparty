@@ -185,6 +185,8 @@ const COLORS = ['#ff7a59', '#4cc9f0', '#f7b801', '#80ed99', '#c77dff', '#ff5d8f'
 const EMPTY_ROOM_TTL = 60 * 60 * 1000;
 const MAX_MESSAGES = 200;
 const MAX_SUBTITLE_CHARS = 700_000;
+const REACTIONS = new Set(['😂', '❤️', '😮', '😢', '👏', '🔥', '🎉', '👍']);
+const MAX_REACTIONS_PER_SECOND = 10;
 const MAX_SUBTITLE_DELAY = 600; // seconds, either direction
 
 function newCode() {
@@ -496,6 +498,19 @@ io.on('connection', (socket) => {
     io.to(room.code).emit('source', { source, playback: room.playback, serverNow: Date.now() });
     pushMessage(room, { type: 'system', text: `${user.name} changed the video to "${source.title || 'a new video'}"` });
     if (typeof reply === 'function') reply({ ok: true });
+  });
+
+  let reactionWindow = 0;
+  let reactionCount = 0;
+  socket.on('reaction', (emoji) => {
+    if (!room || !REACTIONS.has(emoji)) return;
+    const second = Math.floor(Date.now() / 1000);
+    if (second !== reactionWindow) {
+      reactionWindow = second;
+      reactionCount = 0;
+    }
+    if (++reactionCount > MAX_REACTIONS_PER_SECOND) return;
+    socket.to(room.code).emit('reaction', emoji);
   });
 
   socket.on('subtitles', (input, reply) => {
