@@ -6,6 +6,8 @@ import {
   openDriveFile, pickDriveVideo, pickDriveSubtitles, pickHlsFiles, ensureMediaWorker, accessMessage, NeedsConsentError,
 } from './google.js';
 
+import { maybeSwing } from './spiderman.js';
+
 const $ = (id) => document.getElementById(id);
 const code = decodeURIComponent(location.pathname.split('/').filter(Boolean).pop() || '').toUpperCase();
 const params = new URLSearchParams(location.search);
@@ -563,6 +565,8 @@ function addMessage(message, isNew) {
   messagesEl.append(node);
   while (messagesEl.childElementCount > 300) messagesEl.firstElementChild.remove();
   if (nearBottom || mine || !isNew) messagesEl.scrollTop = messagesEl.scrollHeight;
+
+  if (isNew && message.type === 'user') maybeSwing(message.text, video.parentElement);
 
   if (isNew && !mine && message.type === 'user' && !chatIsOpen()) {
     unread++;
