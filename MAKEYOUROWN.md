@@ -17,9 +17,13 @@ DriveParty only asks for access to **the files each person picks**, not their wh
 
 Browsers play MP4 (H.264 video + AAC audio), WebM and HLS streams reliably. MKV files, HEVC/H.265 video, or AC3/DTS audio often won't play; convert them with HandBrake (preset "Fast 1080p30") first.
 
+## Subtitles
+
+Click the **Subtitles** button in a party and choose an `.srt` or `.vtt` file from Google Drive or from your device. It's converted to WebVTT in the browser and sent to everyone in the party through the server, so guests don't need access to the subtitle file. Each viewer can hide the subtitles on their own screen, and anyone can remove or replace them. If the captions run ahead of or behind the speech, the **Subtitle delay** slider shifts them for everyone. Changing the video clears them. Unlike the video, the subtitle text does pass through the server, which keeps it in memory for as long as the party exists.
+
 ## HLS streams (.m3u8)
 
-**HLS links.** Paste an `.m3u8` link when creating a party or changing the video. It plays with [hls.js](https://github.com/video-dev/hls.js) (or Safari's built-in HLS), and each viewer loads it straight from the host, so no sign-in is needed and no bandwidth goes through DriveParty. The host has to allow playback from other websites (CORS); most streaming CDNs do. Signed links that expire will stop working for guests who join later.
+**HLS links.** Paste an `.m3u8` link when creating a party or changing the video. It plays with [hls.js](https://github.com/video-dev/hls.js) (or Safari's built-in HLS), and each viewer loads it straight from the host, so no sign-in is needed and no bandwidth goes through DriveParty. If the host doesn't allow playback from other websites (CORS), DriveParty falls back to relaying the stream through its own server, which does use the server's bandwidth for every viewer. Signed links that expire will stop working for guests who join later.
 
 **HLS in Google Drive.** Upload the playlist and all of its files into **one Drive folder**, share the folder with your friends, then choose the `.m3u8` file in the picker (it's under **All files**). DriveParty finds each file the playlist mentions by name in that folder, so:
 

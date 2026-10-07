@@ -1,7 +1,11 @@
 import express from 'express';
 import { createServer } from 'node:http';
 import crypto from 'node:crypto';
+import { lookup } from 'node:dns/promises';
+import { BlockList, isIP } from 'node:net';
 import path from 'node:path';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 import { Server } from 'socket.io';
 
@@ -180,6 +184,8 @@ const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const COLORS = ['#ff7a59', '#4cc9f0', '#f7b801', '#80ed99', '#c77dff', '#ff5d8f', '#56cfe1', '#ffd166'];
 const EMPTY_ROOM_TTL = 60 * 60 * 1000;
 const MAX_MESSAGES = 200;
+const MAX_SUBTITLE_CHARS = 700_000;
+const MAX_SUBTITLE_DELAY = 600; // seconds, either direction
 
 function newCode() {
   let code;
@@ -224,6 +230,7 @@ function snapshot(room) {
     code: room.code,
     source: room.source,
     playback: room.playback,
+    subtitles: room.subtitles,
     users: [...room.users.values()],
     serverNow: Date.now(),
   };
@@ -245,6 +252,7 @@ app.post('/api/parties', (req, res) => {
     code,
     source,
     playback: { paused: true, time: 0, at: Date.now(), rate: 1 },
+    subtitles: null, // { name, vtt }, shared with everyone in the party
     users: new Map(),
     messages: [],
     emptySince: Date.now(),
@@ -257,6 +265,166 @@ app.get('/api/parties/:code', (req, res) => {
   const room = rooms.get(String(req.params.code).toUpperCase());
   if (!room) return res.status(404).json({ exists: false });
   res.json({ exists: true, title: room.source.title, users: room.users.size });
+});
+
+// ---------------------------------------------------------------------------
+// Stream relay
+//
+// Some HLS hosts refuse requests made by other websites (CORS), so a browser
+// can't play them directly. For those, the server fetches the stream on the
+// viewer's behalf: it rewrites each playlist so every address in it points
+// back here, then pipes the segments through. Only a party's own stream and
+// the addresses found inside its playlists (signed below) can be fetched.
+// ---------------------------------------------------------------------------
+
+const RELAY_USER_AGENT =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
+const RELAY_TIMEOUT = 20_000; // until the host starts answering
+const MAX_PLAYLIST_BYTES = 5e6;
+const MAX_REDIRECTS = 5;
+
+// Never fetch from this machine or its private network on a visitor's behalf.
+const privateNetworks = new BlockList();
+for (const [net, prefix] of [['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8], ['169.254.0.0', 16], ['172.16.0.0', 12], ['192.168.0.0', 16]]) {
+  privateNetworks.addSubnet(net, prefix, 'ipv4');
+}
+for (const [net, prefix] of [['::', 127], ['fc00::', 7], ['fe80::', 10]]) privateNetworks.addSubnet(net, prefix, 'ipv6');
+
+function relayError(status, message) {
+  return Object.assign(new Error(message), { status });
+}
+
+async function assertPublicHost(url) {
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') throw relayError(400, 'Unsupported link.');
+  const host = url.hostname.replace(/^\[|\]$/g, '');
+  const addresses = isIP(host) ? [{ address: host, family: isIP(host) }] : await lookup(host, { all: true });
+  if (!addresses.length || addresses.some((a) => privateNetworks.check(a.address, a.family === 6 ? 'ipv6' : 'ipv4'))) {
+    throw relayError(400, 'That address can\'t be relayed.');
+  }
+}
+
+/** Fetch like a browser would, following redirects by hand so every hop gets checked. */
+async function relayFetch(target, { range, signal } = {}) {
+  let url = new URL(target);
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+    await assertPublicHost(url);
+    const headers = { 'user-agent': RELAY_USER_AGENT, accept: '*/*', 'accept-encoding': 'identity' };
+    if (range) headers.range = range;
+    const res = await fetch(url, { headers, redirect: 'manual', signal });
+    const location = res.status >= 300 && res.status < 400 && res.headers.get('location');
+    if (!location) return res;
+    await res.body?.cancel();
+    url = new URL(location, url);
+  }
+  throw relayError(502, 'Too many redirects.');
+}
+
+const relaySignature = (kind, payload) => crypto.createHmac('sha256', sessionKey).update(`${kind}.${payload}`).digest('base64url').slice(0, 22);
+
+/** kind: 'p' for a playlist (rewritten on the way through), 's' for segments, keys and other bytes. */
+function relayPath(kind, url) {
+  const payload = Buffer.from(url).toString('base64url');
+  return `/relay/${kind}/${payload}.${relaySignature(kind, payload)}`;
+}
+
+function rewritePlaylist(text, base) {
+  // In a master playlist the bare lines are other playlists; in a media playlist they're segments.
+  const master = text.includes('#EXT-X-STREAM-INF');
+  const through = (kind, uri) => {
+    try {
+      const url = new URL(uri, base);
+      return url.protocol === 'http:' || url.protocol === 'https:' ? relayPath(kind, url.href) : uri;
+    } catch {
+      return uri;
+    }
+  };
+  return text
+    .split(/\r?\n/)
+    .map((raw) => {
+      const line = raw.trim();
+      if (!line) return line;
+      if (!line.startsWith('#')) return through(master ? 'p' : 's', line);
+      const kind = /^#EXT-X-(MEDIA|I-FRAME-STREAM-INF):/.test(line) ? 'p' : 's';
+      return line.replace(/URI="([^"]*)"/g, (_, uri) => `URI="${through(kind, uri)}"`);
+    })
+    .join('\n');
+}
+
+async function readPlaylist(upstream) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of upstream.body ?? []) {
+    size += chunk.length;
+    if (size > MAX_PLAYLIST_BYTES) throw relayError(502, 'That playlist is too big.');
+    chunks.push(chunk);
+  }
+  const text = Buffer.concat(chunks).toString('utf8');
+  if (!text.trimStart().startsWith('#EXTM3U')) throw relayError(502, 'That link isn\'t an HLS playlist.');
+  return text;
+}
+
+async function relay(req, res, kind, target) {
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), RELAY_TIMEOUT);
+  res.on('close', () => abort.abort());
+  try {
+    const upstream = await relayFetch(target, { range: kind === 's' ? req.get('range') : undefined, signal: abort.signal });
+    if (kind === 'p') {
+      if (!upstream.ok) throw relayError(upstream.status, 'The stream\'s host refused the request.');
+      const text = await readPlaylist(upstream);
+      res.set({ 'content-type': 'application/vnd.apple.mpegurl', 'cache-control': 'no-store' });
+      return res.send(rewritePlaylist(text, upstream.url));
+    }
+    clearTimeout(timer);
+    res.status(upstream.status);
+    for (const name of ['content-type', 'content-range', 'accept-ranges']) {
+      if (upstream.headers.has(name)) res.set(name, upstream.headers.get(name));
+    }
+    // fetch() already undid any compression, so the host's length would be wrong.
+    if (upstream.headers.has('content-length') && !upstream.headers.has('content-encoding')) {
+      res.set('content-length', upstream.headers.get('content-length'));
+    }
+    if (!upstream.body) return res.end();
+    await pipeline(Readable.fromWeb(upstream.body), res);
+  } catch (err) {
+    if (res.headersSent) return res.destroy();
+    res.status(err.status || 502).json({ error: err.status ? err.message : 'Couldn\'t reach the stream\'s host.' });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+app.get('/relay/party/:code', (req, res) => {
+  const room = rooms.get(String(req.params.code).toUpperCase());
+  if (room?.source.type !== 'url' || room.source.format !== 'hls') return res.status(404).json({ error: 'No stream to relay.' });
+  relay(req, res, 'p', room.source.url);
+});
+
+app.get('/relay/:kind/:token', (req, res) => {
+  const { kind } = req.params;
+  const [payload, signature = ''] = String(req.params.token).split('.');
+  const expected = relaySignature(kind, payload);
+  if (!['p', 's'].includes(kind) || signature.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) {
+    return res.status(403).json({ error: 'Bad relay link.' });
+  }
+  relay(req, res, kind, Buffer.from(payload, 'base64url').toString('utf8'));
+});
+
+/** Is this link an HLS playlist? Browsers often can't check for themselves (CORS). */
+app.post('/api/probe', async (req, res) => {
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), 8000);
+  try {
+    const upstream = await relayFetch(String(req.body?.url || ''), { range: 'bytes=0-6', signal: abort.signal });
+    // Read only the first chunk, in case the host ignores the Range header.
+    const { value } = await upstream.body.getReader().read();
+    res.json({ hls: Buffer.from(value ?? []).subarray(0, 7).toString() === '#EXTM3U' });
+  } catch {
+    res.json({ hls: false });
+  } finally {
+    clearTimeout(timer);
+    abort.abort();
+  }
 });
 
 io.on('connection', (socket) => {
@@ -323,10 +491,35 @@ io.on('connection', (socket) => {
     const source = validateSource(input);
     if (!source) return typeof reply === 'function' && reply({ error: 'Invalid video source.' });
     room.source = source;
+    room.subtitles = null;
     room.playback = { paused: true, time: 0, at: Date.now(), rate: 1 };
     io.to(room.code).emit('source', { source, playback: room.playback, serverNow: Date.now() });
     pushMessage(room, { type: 'system', text: `${user.name} changed the video to "${source.title || 'a new video'}"` });
     if (typeof reply === 'function') reply({ ok: true });
+  });
+
+  socket.on('subtitles', (input, reply) => {
+    if (!room || typeof reply !== 'function') return;
+    if (input === null) {
+      if (!room.subtitles) return reply({ ok: true });
+      room.subtitles = null;
+      pushMessage(room, { type: 'system', text: `${user.name} removed the subtitles` });
+    } else {
+      const vtt = typeof input?.vtt === 'string' ? input.vtt : '';
+      if (!vtt.startsWith('WEBVTT')) return reply({ error: 'That isn\'t a subtitle file.' });
+      if (vtt.length > MAX_SUBTITLE_CHARS) return reply({ error: 'That subtitle file is too big.' });
+      room.subtitles = { name: cleanText(input.name, 100) || 'Subtitles', vtt, delay: 0 };
+      pushMessage(room, { type: 'system', text: `${user.name} added subtitles "${room.subtitles.name}"` });
+    }
+    io.to(room.code).emit('subtitles', room.subtitles);
+    reply({ ok: true });
+  });
+
+  socket.on('subtitle-delay', (value) => {
+    const delay = Math.round(Number(value) * 10) / 10;
+    if (!room?.subtitles || !Number.isFinite(delay) || Math.abs(delay) > MAX_SUBTITLE_DELAY) return;
+    room.subtitles.delay = delay;
+    socket.to(room.code).emit('subtitle-delay', delay);
   });
 
   socket.on('disconnect', () => {

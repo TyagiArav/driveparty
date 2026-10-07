@@ -274,6 +274,33 @@ export async function pickHlsFiles({ folderId }) {
   return docs ? docs.length : null;
 }
 
+/**
+ * Let the user choose a subtitle file (.srt or .vtt) from Drive and download it.
+ * Resolves to { name, bytes } or null if cancelled.
+ */
+export async function pickDriveSubtitles() {
+  await initGoogle();
+  const [token] = await Promise.all([getAccessToken(), loadPickerApi()]);
+  const { picker } = window.google;
+  const docs = await openPicker({
+    token,
+    views: [
+      new picker.DocsView(picker.ViewId.DOCS).setQuery('.srt').setLabel('.srt files').setMode(picker.DocsViewMode.LIST),
+      new picker.DocsView(picker.ViewId.DOCS).setQuery('.vtt').setLabel('.vtt files').setMode(picker.DocsViewMode.LIST),
+      new picker.DocsView(picker.ViewId.DOCS).setIncludeFolders(true).setLabel('All files').setMode(picker.DocsViewMode.LIST),
+    ],
+    title: 'Choose a subtitle file (.srt or .vtt)',
+  });
+  if (!docs) return null;
+  const doc = docs[0];
+  if (doc.sizeBytes > 2_000_000) throw new Error('That file is too big to be subtitles.');
+  const res = await fetch(`${DRIVE_FILES}/${encodeURIComponent(doc.id)}?alt=media&supportsAllDrives=true`, {
+    headers: { Authorization: `Bearer ${token}` },
+  }).catch(() => null);
+  if (!res?.ok) throw new Error('Couldn\'t download that file from Google Drive.');
+  return { name: doc.name, bytes: await res.arrayBuffer() };
+}
+
 function loadPickerApi() {
   return loadScript('https://apis.google.com/js/api.js').then(() => new Promise((resolve) => window.gapi.load('picker', resolve)));
 }

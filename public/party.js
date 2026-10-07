@@ -1,9 +1,9 @@
 import {
-  parseSource, detectUrlFormat, sourceSrc, urlTitle, formatTime, savedName, saveName, toast, copyText,
+  parseSource, detectUrlFormat, sourceSrc, urlTitle, subtitlesToVtt, formatTime, savedName, saveName, toast, copyText,
 } from './common.js';
 import {
   initGoogle, getMe, signIn, signOut, checkDriveAccess, checkDriveHls, checkLinkShared, enableLinkSharing,
-  openDriveFile, pickDriveVideo, pickHlsFiles, ensureMediaWorker, accessMessage, NeedsConsentError,
+  openDriveFile, pickDriveVideo, pickDriveSubtitles, pickHlsFiles, ensureMediaWorker, accessMessage, NeedsConsentError,
 } from './google.js';
 
 const $ = (id) => document.getElementById(id);
@@ -31,6 +31,7 @@ let videoFailed = false;
 let unread = 0;
 let firstJoin = true;
 let hls = null; // hls.js instance for HLS sources
+let relaying = false; // playing a link's stream through the server (see relayStream)
 let autoPickedKey = ''; // source the Drive picker was already opened for automatically
 
 // ---------------------------------------------------------------------------
@@ -145,6 +146,7 @@ function setSource(source) {
 
   sourceKey = key;
   videoFailed = false;
+  relaying = false;
   destroyHls();
   video.removeAttribute('src');
   video.load();
@@ -175,7 +177,7 @@ function loadHlsLibrary() {
 
 async function loadVideo(source) {
   showLoading();
-  const src = sourceSrc(source);
+  const src = relaying ? `/relay/party/${room.code}` : sourceSrc(source);
   if (source.format !== 'hls') {
     video.src = src;
     video.load();
@@ -205,6 +207,7 @@ async function loadVideo(source) {
         retriedNetwork = true;
         return hls.startLoad();
       }
+      if (source.type === 'url' && !relaying) return relayStream(source);
       handleHlsFailure(source, data);
     });
     hls.loadSource(src);
@@ -218,6 +221,13 @@ async function loadVideo(source) {
   } else {
     showProblem('Can\'t play this stream', 'This browser doesn\'t support HLS streams.');
   }
+}
+
+/** Hosts that turn away other websites (CORS) can still be played through the server. */
+function relayStream(source) {
+  relaying = true;
+  destroyHls();
+  loadVideo(source);
 }
 
 async function handleHlsFailure(source, data) {
@@ -235,7 +245,7 @@ async function handleHlsFailure(source, data) {
     return showProblem(
       'Couldn\'t load this stream',
       source.type === 'url'
-        ? `The playlist didn't load${status ? ` (HTTP ${status})` : ''}. The site hosting it may block playback from other websites (CORS), or the link may have expired.`
+        ? `The playlist didn't load${status ? ` (HTTP ${status})` : ''}. The link may have expired, or its host may only serve the website it came from.`
         : 'The playlist file couldn\'t be read.',
     );
   }
@@ -391,6 +401,7 @@ video.addEventListener('loadedmetadata', () => {
 
 video.addEventListener('error', async () => {
   if (!room || !video.getAttribute('src') || hls) return; // hls.js reports its own errors
+  if (room.source.type === 'url' && room.source.format === 'hls' && !relaying) return relayStream(room.source);
   videoFailed = true;
   const key = sourceKey;
   showLoading();
@@ -464,6 +475,7 @@ function onJoined(res) {
   updateUnread();
   for (const message of res.messages) addMessage(message, false);
   setSource(room.source);
+  applySubtitles();
 
   if (firstJoin) {
     firstJoin = false;
@@ -489,7 +501,22 @@ socket.on('source', ({ source, playback }) => {
   if (!room) return;
   room.source = source;
   room.playback = playback;
+  room.subtitles = null;
   setSource(source);
+  applySubtitles();
+});
+
+socket.on('subtitle-delay', (delay) => {
+  if (!room?.subtitles) return;
+  room.subtitles.delay = delay;
+  applySubtitleDelay();
+  showSubtitleDelay();
+});
+
+socket.on('subtitles', (subtitles) => {
+  if (!room) return;
+  room.subtitles = subtitles;
+  applySubtitles();
 });
 
 socket.on('users', (users) => {
@@ -694,6 +721,120 @@ $('change-form').addEventListener('submit', async (event) => {
     submit.textContent = 'Switch video';
   }
 });
+
+// ---------------------------------------------------------------------------
+// Subtitles
+// ---------------------------------------------------------------------------
+
+const MAX_SUBTITLE_CHARS = 700_000;
+const MAX_SUBTITLE_DELAY = 600;
+const SUBTITLE_DELAY_STEP = 0.5;
+let subtitleTrack = null; // the <track> showing the party's subtitles
+let showSubtitles = true; // this viewer's own choice
+
+/** Make the player's subtitle track match the party's shared subtitles. */
+function applySubtitles() {
+  if (subtitleTrack) {
+    URL.revokeObjectURL(subtitleTrack.src);
+    subtitleTrack.remove();
+    subtitleTrack = null;
+  }
+  const subtitles = room?.subtitles;
+  if (subtitles) {
+    subtitleTrack = el('track', {
+      kind: 'subtitles',
+      label: subtitles.name,
+      src: URL.createObjectURL(new Blob([subtitles.vtt], { type: 'text/vtt' })),
+    });
+    subtitleTrack.addEventListener('load', applySubtitleDelay);
+    video.append(subtitleTrack);
+    subtitleTrack.track.mode = showSubtitles ? 'showing' : 'hidden';
+  }
+  showSubtitleDelay();
+  $('subs-current').classList.toggle('hidden', !subtitles);
+  $('subs-name').textContent = subtitles ? `Now showing: ${subtitles.name}` : '';
+  $('subs-btn').classList.toggle('active', Boolean(subtitles));
+}
+
+const originalCueTimes = new WeakMap(); // cue -> [start, end] as written in the file
+
+/** Shift every cue by the party's subtitle delay (positive: captions appear later). */
+function applySubtitleDelay() {
+  const delay = room?.subtitles?.delay || 0;
+  for (const cue of subtitleTrack?.track.cues || []) {
+    if (!originalCueTimes.has(cue)) originalCueTimes.set(cue, [cue.startTime, cue.endTime]);
+    const [start, end] = originalCueTimes.get(cue);
+    cue.endTime = Math.max(cue.endTime, end + delay); // keeps start < end whichever way the cue moves
+    cue.startTime = Math.max(0, start + delay);
+    cue.endTime = Math.max(0, end + delay);
+  }
+}
+
+function showSubtitleDelay() {
+  const delay = room?.subtitles?.delay || 0;
+  $('subs-delay-range').value = delay;
+  if (document.activeElement !== $('subs-delay')) $('subs-delay').value = delay;
+}
+
+function setSubtitleDelay(value) {
+  if (!room?.subtitles || !Number.isFinite(value)) return;
+  const delay = Math.max(-MAX_SUBTITLE_DELAY, Math.min(MAX_SUBTITLE_DELAY, Math.round(value * 10) / 10));
+  room.subtitles.delay = delay;
+  applySubtitleDelay();
+  showSubtitleDelay();
+  socket.emit('subtitle-delay', delay);
+}
+
+$('subs-delay-range').addEventListener('input', (event) => setSubtitleDelay(event.target.valueAsNumber));
+$('subs-delay').addEventListener('input', (event) => setSubtitleDelay(event.target.valueAsNumber));
+$('subs-delay').addEventListener('blur', showSubtitleDelay);
+$('subs-earlier').addEventListener('click', () => setSubtitleDelay(room.subtitles.delay - SUBTITLE_DELAY_STEP));
+$('subs-later').addEventListener('click', () => setSubtitleDelay(room.subtitles.delay + SUBTITLE_DELAY_STEP));
+
+function shareSubtitles(name, bytes) {
+  const vtt = subtitlesToVtt(bytes);
+  if (!vtt) throw new Error('That doesn\'t look like an .srt or .vtt subtitle file.');
+  if (vtt.length > MAX_SUBTITLE_CHARS) throw new Error('That subtitle file is too big.');
+  socket.emit('subtitles', { name, vtt }, (res) => {
+    if (res?.error) $('subs-error').textContent = res.error;
+  });
+}
+
+$('subs-btn').addEventListener('click', () => {
+  $('subs-error').textContent = '';
+  openModal('subs-modal');
+});
+
+$('subs-pick').addEventListener('click', async () => {
+  $('subs-error').textContent = '';
+  try {
+    const picked = await pickDriveSubtitles();
+    if (picked) shareSubtitles(picked.name, picked.bytes);
+  } catch (err) {
+    $('subs-error').textContent = err.status === 401 ? 'Sign in with Google first, or upload the file from this device.' : err.message;
+  }
+});
+
+$('subs-upload').addEventListener('click', () => $('subs-file').click());
+$('subs-file').addEventListener('change', async (event) => {
+  const file = event.target.files[0];
+  event.target.value = '';
+  if (!file) return;
+  $('subs-error').textContent = '';
+  try {
+    if (file.size > 2_000_000) throw new Error('That file is too big to be subtitles.');
+    shareSubtitles(file.name, await file.arrayBuffer());
+  } catch (err) {
+    $('subs-error').textContent = err.message;
+  }
+});
+
+$('subs-show').addEventListener('change', (event) => {
+  showSubtitles = event.target.checked;
+  if (subtitleTrack) subtitleTrack.track.mode = showSubtitles ? 'showing' : 'hidden';
+});
+
+$('subs-remove').addEventListener('click', () => socket.emit('subtitles', null, () => {}));
 
 function toggleFullscreen() {
   if (document.fullscreenElement) return document.exitFullscreen();

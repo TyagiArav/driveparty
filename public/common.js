@@ -35,7 +35,15 @@ export async function detectUrlFormat(source) {
     reader.cancel();
     if (new TextDecoder().decode(value?.slice(0, 7)) === '#EXTM3U') return { ...source, format: 'hls' };
   } catch {
-    // Cross-origin hosts often block this check; play it as a regular file.
+    // Cross-origin hosts often block this check; the server isn't bound by CORS, so ask it.
+    try {
+      const res = await fetch('/api/probe', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ url: source.url }),
+      });
+      if ((await res.json()).hls) return { ...source, format: 'hls' };
+    } catch {}
   }
   return source;
 }
@@ -69,6 +77,24 @@ export function extractCode(input) {
   const fromLink = value.match(/\/party\/([A-Za-z0-9]{4,12})/);
   const code = (fromLink ? fromLink[1] : value).toUpperCase().replace(/[^A-Z0-9]/g, '');
   return code.length >= 4 ? code : '';
+}
+
+/**
+ * Turn the bytes of an .srt or .vtt file into WebVTT text, the only format browsers display.
+ * Returns '' if the file doesn't look like subtitles.
+ */
+export function subtitlesToVtt(bytes) {
+  let text;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    text = new TextDecoder('windows-1252').decode(bytes); // older .srt files often aren't UTF-8
+  }
+  text = text.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n').trim();
+  if (!/\d{2}:\d{2}[.,]\d{3} +--> +/.test(text)) return '';
+  if (text.startsWith('WEBVTT')) return `${text}\n`;
+  // SRT differs only in its comma before the milliseconds.
+  return `WEBVTT\n\n${text.replace(/(\d{2}:\d{2}),(\d{3})/g, '$1.$2')}\n`;
 }
 
 const NAME_KEY = 'driveparty:name';

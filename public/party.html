@@ -23,6 +23,9 @@
         <button class="btn ghost icon" id="change-btn" title="Change video">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="15" height="14" rx="2"/><path d="m17 10 5-3v10l-5-3"/></svg>
         </button>
+        <button class="btn ghost icon" id="subs-btn" title="Subtitles">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M10.5 10.5a2 2 0 1 0 0 3M17.5 10.5a2 2 0 1 0 0 3"/></svg>
+        </button>
         <button class="btn ghost icon" id="fullscreen-btn" title="Fullscreen (F)">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
         </button>
@@ -113,6 +116,33 @@
         <button class="btn" type="submit" id="change-submit">Switch video</button>
       </div>
     </form>
+  </div>
+
+  <div class="modal hidden" id="subs-modal">
+    <div class="card">
+      <h2>Subtitles</h2>
+      <p class="hint">Add an .srt or .vtt file. Everyone in the party gets the same subtitles.</p>
+      <div class="sharing hidden" id="subs-current">
+        <p class="hint" id="subs-name"></p>
+        <label class="check"><input type="checkbox" id="subs-show" checked> Show on my screen</label>
+        <div class="delay">
+          <label for="subs-delay-range">Subtitle delay</label>
+          <input type="range" id="subs-delay-range" min="-30" max="30" step="0.1" value="0">
+          <div class="delay-row">
+            <button class="btn" type="button" id="subs-earlier" title="The speech comes before its caption: show captions sooner"><span>‹</span>Heard audio</button>
+            <div class="delay-value"><input class="input" type="number" id="subs-delay" step="0.1" value="0" aria-label="Subtitle delay in seconds"><span>s</span></div>
+            <button class="btn" type="button" id="subs-later" title="The caption comes before its speech: show captions later"><span>›</span>Saw caption</button>
+          </div>
+          <p class="hint">Press whichever came first until they line up. The delay applies to everyone.</p>
+        </div>
+        <button class="btn" type="button" id="subs-remove">Remove for everyone</button>
+      </div>
+      <button class="btn primary" type="button" id="subs-pick">Choose from Google Drive</button>
+      <button class="btn" type="button" id="subs-upload">Upload from this device</button>
+      <input class="hidden" type="file" id="subs-file" accept=".srt,.vtt,text/vtt,application/x-subrip">
+      <p class="error" id="subs-error"></p>
+      <div class="actions-row"><button class="btn" data-close>Done</button></div>
+    </div>
   </div>
 
   <script src="/socket.io/socket.io.js"></script>

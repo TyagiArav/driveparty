@@ -15,5 +15,8 @@
     "express": "^5.1.0",
     "hls.js": "^1.7.3",
     "socket.io": "^4.8.1"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.63.0"
   }
 }

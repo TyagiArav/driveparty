@@ -62,12 +62,13 @@ They sign in, and you're in sync. Whoever presses play, everyone plays.
 | 💬 **Live chat** | Toggleable sidebar with unread badges and pop-up previews when it's hidden |
 | 🔗 **Easy invites** | Share a link or a short party code |
 | 🔒 **Private by design** | DriveParty can only open the specific files you pick, never your whole Drive |
+| 🔤 **Subtitles** | Add an `.srt` or `.vtt` file from Drive or your device, and everyone in the party sees it |
 | 📺 **HLS streaming** | Plays `.m3u8` stream links and HLS videos stored in Drive |
 | ⌨️ **Keyboard shortcuts** | `Space` play/pause · `←` `→` skip 10s · `C` chat · `F` fullscreen |
 
 ## Privacy
 
-Your video goes **straight from Google Drive to each viewer's browser**, never through DriveParty's servers. The server only relays tiny messages: who pressed play, where they skipped to, and what they typed in chat.
+Your video goes **straight from Google Drive to each viewer's browser**, never through DriveParty's servers. The server only relays tiny messages: who pressed play, where they skipped to, and what they typed in chat. If someone adds a subtitle file, its text is passed along to the other viewers the same way.
 
 When you sign in, Google asks you to let DriveParty open **only the files you choose**. DriveParty can't browse, edit or delete anything else in your Drive, and it doesn't keep a database of users. Parties and chat disappear an hour after everyone leaves.
 
