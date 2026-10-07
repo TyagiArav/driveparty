@@ -34,6 +34,8 @@ let unread = 0;
 let firstJoin = true;
 let hls = null; // hls.js instance for HLS sources
 let relaying = false; // playing a link's stream through the server (see relayStream)
+let slowLoadTimer = null; // see watchForThrottling
+const SLOW_LOAD_MS = 10_000;
 let autoPickedKey = ''; // source the Drive picker was already opened for automatically
 
 // ---------------------------------------------------------------------------
@@ -162,6 +164,7 @@ function retrySource() {
 }
 
 function destroyHls() {
+  clearTimeout(slowLoadTimer);
   hls?.destroy();
   hls = null;
 }
@@ -212,6 +215,7 @@ async function loadVideo(source) {
       if (source.type === 'url' && !relaying) return relayStream(source);
       handleHlsFailure(source, data);
     });
+    if (source.type === 'url' && !relaying) watchForThrottling(hls, Hls, source);
     hls.loadSource(src);
     hls.attachMedia(video);
   } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
@@ -223,6 +227,24 @@ async function loadVideo(source) {
   } else {
     showProblem('Can\'t play this stream', 'This browser doesn\'t support HLS streams.');
   }
+}
+
+/**
+ * Some hosts answer other websites but slow them to a crawl, so the stream starts from what's
+ * cached and then hangs, most visibly after a seek. If a part is still loading after a while
+ * and the video has run dry, switch to the server relay, which those hosts don't throttle.
+ */
+function watchForThrottling(player, Hls, source) {
+  const check = () => {
+    if (player !== hls) return;
+    if (video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) slowLoadTimer = setTimeout(check, 2000);
+    else relayStream(source);
+  };
+  player.on(Hls.Events.FRAG_LOADING, () => {
+    clearTimeout(slowLoadTimer);
+    slowLoadTimer = setTimeout(check, SLOW_LOAD_MS);
+  });
+  player.on(Hls.Events.FRAG_LOADED, () => clearTimeout(slowLoadTimer));
 }
 
 /** Hosts that turn away other websites (CORS) can still be played through the server. */
